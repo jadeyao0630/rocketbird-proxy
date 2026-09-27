@@ -4,14 +4,15 @@ const cors = require('cors');
 const cookieParser = require('cookie-parser');
 const bodyParser = require('body-parser');
 const { PORT, FRONTEND_ORIGIN } = require('./config');
-const { initDatabase } = require('./server/db');           // ⭐ 新增
+const { initDatabase } = require('./server/db');
 
 const authRoutes = require('./routes/auth');
 const classStatsRoutes = require('./routes/classStats');
 const cutoverRoutes = require('./routes/cutover');
 const coachRoutes = require('./routes/coach');
 const marketersRoutes = require('./routes/marketers');
-const compensationRoutes = require('./server/routes/compensation');   // ⭐ 新增
+const compensationRoutes = require('./server/routes/compensation');
+const adminAuthRoutes = require('./routes/adminAuth');   // ⭐ 新增
 
 const app = express();
 
@@ -35,7 +36,8 @@ app.use('/api', classStatsRoutes);
 app.use('/api', cutoverRoutes);
 app.use('/api', coachRoutes);
 app.use('/api', marketersRoutes);
-app.use('/api', compensationRoutes);                 // ⭐ 新增
+app.use('/api', compensationRoutes);
+app.use('/api', adminAuthRoutes);   // ⭐ 新增
 
 app.get('/health', (req, res) => {
   res.json({ ok: true, time: new Date().toISOString() });
@@ -45,7 +47,6 @@ app.use((req, res) => {
   res.status(404).json({ error: 'Not Found', path: req.originalUrl });
 });
 
-/* ⭐ 先初始化数据库，再启动 HTTP 服务 */
 initDatabase()
   .then(() => {
     app.listen(PORT, '0.0.0.0', () => {

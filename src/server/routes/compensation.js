@@ -3,6 +3,56 @@ const router = express.Router();
 const { pool } = require('../db');
 
 /* ============================================================
+ * 工具：字段类型兜底
+ * ============================================================ */
+
+/** JSON 列：对象/数组 → JSON 字符串；合法 JSON 字符串 → 原样；
+ *  非法字符串 → 包成 JSON 字符串；null/'' → null
+ */
+function toJson(v) {
+  if (v == null || v === '') return null;
+
+  /* 字符串处理 */
+  if (typeof v === 'string') {
+    const s = v.trim();
+    if (s === '') return null;
+    try {
+      JSON.parse(s);
+      return s;              // 合法 JSON 字符串，原样返回
+    } catch {
+      return JSON.stringify(s);   // 非法 JSON 字符串，包成 JSON 字符串
+    }
+  }
+
+  /* 对象/数组 → 序列化成字符串（关键修复：不再返回对象本身） */
+  try {
+    return JSON.stringify(v);
+  } catch {
+    return null;
+  }
+}
+
+/** 数字列：null/空串 → null；否则 Number；NaN → null */
+function toNum(v) {
+  if (v == null || v === '') return null;
+  const n = Number(v);
+  return Number.isFinite(n) ? n : null;
+}
+
+/** 数字列：null/空串 → 0 */
+function toNumOrZero(v) {
+  const n = toNum(v);
+  return n == null ? 0 : n;
+}
+
+/** 字符串列：null/空串 → null */
+function toStr(v) {
+  if (v == null) return null;
+  const s = String(v).trim();
+  return s === '' ? null : s;
+}
+
+/* ============================================================
  * 列表：某门店所有方案
  * ============================================================ */
 router.get('/compensation/plans', async (req, res) => {
@@ -27,7 +77,7 @@ router.get('/compensation/plans', async (req, res) => {
 });
 
 /* ============================================================
- * 详情：按门店 + 月份
+ * 详情
  * ============================================================ */
 router.get('/compensation/plan', async (req, res) => {
   try {
@@ -95,6 +145,22 @@ router.get('/compensation/plan', async (req, res) => {
       p.headcount = Number(p.headcount);
       p.performanceTarget = Number(p.performance_target);
       p.totalBaseSalary = Number(p.total_base_salary);
+
+      /* calc_flags 从数据库读出来是字符串，parse 成对象返回给前端 */
+      if (p.calc_flags != null) {
+        if (typeof p.calc_flags === 'string') {
+          try {
+            p.calcFlags = JSON.parse(p.calc_flags);
+          } catch {
+            p.calcFlags = undefined;
+          }
+        } else {
+          p.calcFlags = p.calc_flags;
+        }
+      } else {
+        p.calcFlags = undefined;
+      }
+      delete p.calc_flags;
     }
 
     plan.positions = positions;
@@ -148,16 +214,16 @@ router.post('/compensation/plan', async (req, res) => {
          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         [
           planId,
-          p.title,
-          p.category || null,
-          p.headcount || 0,
-          p.performanceTarget || 0,
-          p.performanceSource || 'self',
-          p.totalBaseSalary || 0,
-          p.extraNote || null,
-          p.classCommissionMode || null,
-          p.oldClassFee != null ? p.oldClassFee : null,
-          p.calcFlags ? JSON.stringify(p.calcFlags) : null,
+          toStr(p.title),
+          toStr(p.category),
+          toNumOrZero(p.headcount),
+          toNumOrZero(p.performanceTarget),
+          toStr(p.performanceSource) || 'self',
+          toNumOrZero(p.totalBaseSalary),
+          toStr(p.extraNote),
+          toStr(p.classCommissionMode),
+          toNum(p.oldClassFee),
+          toJson(p.calcFlags),
         ]
       );
       const posId = pr.insertId;
@@ -166,33 +232,48 @@ router.post('/compensation/plan', async (req, res) => {
         await conn.query(
           `INSERT INTO commission_tier (position_id, threshold, rate, class_rate, class_mode, note)
            VALUES (?, ?, ?, ?, ?, ?)`,
-          [posId, t.threshold, t.rate, t.classRate ?? null, t.classMode ?? null, t.note ?? null]
+          [
+            posId,
+            toNumOrZero(t.threshold),
+            toNumOrZero(t.rate),
+            toNum(t.classRate),
+            toStr(t.classMode),
+            toStr(t.note),
+          ]
         );
       }
       for (const t of p.baseSalaryTiers || []) {
         await conn.query(
           `INSERT INTO base_salary_tier (position_id, threshold, amount, note) VALUES (?, ?, ?, ?)`,
-          [posId, t.threshold, t.amount, t.note ?? null]
+          [posId, toNumOrZero(t.threshold), toNumOrZero(t.amount), toStr(t.note)]
         );
       }
       for (const t of p.genderSalaryTiers || []) {
         await conn.query(
           `INSERT INTO gender_salary_tier (position_id, threshold, male, female, newbie, base, note)
            VALUES (?, ?, ?, ?, ?, ?, ?)`,
-          [posId, t.threshold, t.male || 0, t.female || 0, t.newbie || 0, t.base ?? null, t.note ?? null]
+          [
+            posId,
+            toNumOrZero(t.threshold),
+            toNumOrZero(t.male),
+            toNumOrZero(t.female),
+            toNumOrZero(t.newbie),
+            toNum(t.base),
+            toStr(t.note),
+          ]
         );
       }
       for (const c of p.courseCommissions || []) {
         await conn.query(
           `INSERT INTO course_commission (position_id, course_name, mode, value, note)
            VALUES (?, ?, ?, ?, ?)`,
-          [posId, c.courseName, c.mode, c.value, c.note ?? null]
+          [posId, toStr(c.courseName), toStr(c.mode), toNumOrZero(c.value), toStr(c.note)]
         );
       }
       for (const o of p.oldClassFees || []) {
         await conn.query(
           `INSERT INTO old_class_fee_tier (position_id, threshold, fee, note) VALUES (?, ?, ?, ?)`,
-          [posId, o.threshold, o.fee, o.note ?? null]
+          [posId, toNumOrZero(o.threshold), toNumOrZero(o.fee), toStr(o.note)]
         );
       }
     }
@@ -229,6 +310,152 @@ router.delete('/compensation/plan', async (req, res) => {
   } catch (e) {
     console.error(e);
     res.status(500).json({ errorcode: 500, errormsg: e.message });
+  }
+});
+
+/* ============================================================
+ * 复制方案
+ * ============================================================ */
+router.post('/compensation/plan/copy', async (req, res) => {
+  const conn = await pool.getConnection();
+  try {
+    const { storeId, fromMonth, toMonth } = req.body;
+    if (!storeId || !fromMonth || !toMonth) {
+      return res.status(400).json({ errorcode: 400, errormsg: 'storeId/fromMonth/toMonth required' });
+    }
+    if (fromMonth === toMonth) {
+      return res.status(400).json({ errorcode: 400, errormsg: 'fromMonth 不能等于 toMonth' });
+    }
+
+    const [src] = await conn.query(
+      `SELECT * FROM monthly_compensation_plan WHERE store_id = ? AND month = ?`,
+      [storeId, fromMonth]
+    );
+    if (src.length === 0) {
+      return res.status(404).json({ errorcode: 404, errormsg: '源月份方案不存在' });
+    }
+    const srcPlan = src[0];
+
+    await conn.beginTransaction();
+
+    const [dst] = await conn.query(
+      `SELECT id FROM monthly_compensation_plan WHERE store_id = ? AND month = ?`,
+      [storeId, toMonth]
+    );
+    if (dst.length > 0) {
+      await conn.query(`DELETE FROM position_config WHERE plan_id = ?`, [dst[0].id]);
+      await conn.query(`DELETE FROM monthly_compensation_plan WHERE id = ?`, [dst[0].id]);
+    }
+
+    const [newPlan] = await conn.query(
+      `INSERT INTO monthly_compensation_plan
+        (store_id, month, period_label, imported_from, imported_at, is_active)
+       VALUES (?, ?, ?, ?, NOW(), 1)`,
+      [storeId, toMonth, toMonth, `复制自 ${fromMonth}`]
+    );
+    const newPlanId = newPlan.insertId;
+
+    const [positions] = await conn.query(
+      `SELECT * FROM position_config WHERE plan_id = ? ORDER BY id ASC`,
+      [srcPlan.id]
+    );
+
+    for (const p of positions) {
+      const [newPos] = await conn.query(
+        `INSERT INTO position_config
+          (plan_id, title, category, headcount, performance_target, performance_source,
+           total_base_salary, extra_note, class_commission_mode, old_class_fee, calc_flags)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        [
+          newPlanId,
+          toStr(p.title),
+          toStr(p.category),
+          toNumOrZero(p.headcount),
+          toNumOrZero(p.performance_target),
+          toStr(p.performance_source) || 'self',
+          toNumOrZero(p.total_base_salary),
+          toStr(p.extra_note),
+          toStr(p.class_commission_mode),
+          toNum(p.old_class_fee),
+          /* ⭐ 修复：calc_flags 从数据库读到字符串，toJson 会原样返回或包成 JSON */
+          toJson(p.calc_flags),
+        ]
+      );
+      const newPosId = newPos.insertId;
+
+      /* 佣金阶梯 */
+      const [ct] = await conn.query(`SELECT * FROM commission_tier WHERE position_id = ?`, [p.id]);
+      for (const t of ct) {
+        await conn.query(
+          `INSERT INTO commission_tier (position_id, threshold, rate, class_rate, class_mode, note)
+           VALUES (?, ?, ?, ?, ?, ?)`,
+          [
+            newPosId,
+            toNumOrZero(t.threshold),
+            toNumOrZero(t.rate),
+            toNum(t.class_rate),
+            toStr(t.class_mode),
+            toStr(t.note),
+          ]
+        );
+      }
+
+      /* 底薪阶梯 */
+      const [bt] = await conn.query(`SELECT * FROM base_salary_tier WHERE position_id = ?`, [p.id]);
+      for (const t of bt) {
+        await conn.query(
+          `INSERT INTO base_salary_tier (position_id, threshold, amount, note) VALUES (?, ?, ?, ?)`,
+          [newPosId, toNumOrZero(t.threshold), toNumOrZero(t.amount), toStr(t.note)]
+        );
+      }
+
+      /* 性别底薪阶梯 */
+      const [gt] = await conn.query(`SELECT * FROM gender_salary_tier WHERE position_id = ?`, [p.id]);
+      for (const t of gt) {
+        await conn.query(
+          `INSERT INTO gender_salary_tier (position_id, threshold, male, female, newbie, base, note)
+           VALUES (?, ?, ?, ?, ?, ?, ?)`,
+          [
+            newPosId,
+            toNumOrZero(t.threshold),
+            toNumOrZero(t.male),
+            toNumOrZero(t.female),
+            toNumOrZero(t.newbie),
+            toNum(t.base),
+            toStr(t.note),
+          ]
+        );
+      }
+
+      /* 课程提成 */
+      const [cc] = await conn.query(`SELECT * FROM course_commission WHERE position_id = ?`, [p.id]);
+      for (const c of cc) {
+        await conn.query(
+          `INSERT INTO course_commission (position_id, course_name, mode, value, note)
+           VALUES (?, ?, ?, ?, ?)`,
+          [newPosId, toStr(c.course_name), toStr(c.mode), toNumOrZero(c.value), toStr(c.note)]
+        );
+      }
+
+      /* 老课费用阶梯 */
+      const [of] = await conn.query(`SELECT * FROM old_class_fee_tier WHERE position_id = ?`, [p.id]);
+      for (const o of of) {
+        await conn.query(
+          `INSERT INTO old_class_fee_tier (position_id, threshold, fee, note) VALUES (?, ?, ?, ?)`,
+          [newPosId, toNumOrZero(o.threshold), toNumOrZero(o.fee), toStr(o.note)]
+        );
+      }
+    }
+
+    await conn.commit();
+    console.log(`[copy] ${storeId}: ${fromMonth} → ${toMonth}, 岗位数 ${positions.length}`);
+    res.json({ errorcode: 0, data: { id: newPlanId, positionCount: positions.length } });
+  } catch (e) {
+    await conn.rollback();
+    console.error(e);
+    res.status(500).json({ errorcode: 500, errormsg: e.message });
+  } finally {
+    conn.release();
   }
 });
 
@@ -285,8 +512,7 @@ router.post('/compensation/init', async (req, res) => {
 });
 
 /* ============================================================
- * ⭐ 测算设置：读取
- * GET /api/simulation/setting?store_id=xxx&month=xxx
+ * 测算设置：读取
  * ============================================================ */
 router.get('/simulation/setting', async (req, res) => {
   try {
@@ -332,9 +558,7 @@ router.get('/simulation/setting', async (req, res) => {
 });
 
 /* ============================================================
- * ⭐ 测算设置：保存（upsert）
- * POST /api/simulation/setting
- * body: { storeId, month, input: { propertyFee, ... } }
+ * 测算设置：保存
  * ============================================================ */
 router.post('/simulation/setting', async (req, res) => {
   try {
@@ -362,10 +586,72 @@ router.post('/simulation/setting', async (req, res) => {
          water_fee       = VALUES(water_fee),
          network_fee     = VALUES(network_fee),
          other_fee       = VALUES(other_fee)`,
-      [storeId, month, propertyFee, electricityFee, rent, waterFee, networkFee, otherFee]
+      [
+        storeId,
+        month,
+        toNumOrZero(propertyFee),
+        toNumOrZero(electricityFee),
+        toNumOrZero(rent),
+        toNumOrZero(waterFee),
+        toNumOrZero(networkFee),
+        toNumOrZero(otherFee),
+      ]
     );
 
     res.json({ errorcode: 0 });
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ errorcode: 500, errormsg: e.message });
+  }
+});
+
+/* ============================================================
+ * 复制测算设置
+ * ============================================================ */
+router.post('/simulation/setting/copy', async (req, res) => {
+  try {
+    const { storeId, fromMonth, toMonth } = req.body;
+    if (!storeId || !fromMonth || !toMonth) {
+      return res.status(400).json({ errorcode: 400, errormsg: 'storeId/fromMonth/toMonth required' });
+    }
+
+    const [src] = await pool.query(
+      `SELECT property_fee, electricity_fee, rent, water_fee, network_fee, other_fee
+         FROM simulation_setting
+        WHERE store_id = ? AND month = ?`,
+      [storeId, fromMonth]
+    );
+
+    if (src.length === 0) {
+      return res.json({ errorcode: 0, data: { copied: false, reason: 'no_source' } });
+    }
+    const s = src[0];
+
+    await pool.query(
+      `INSERT INTO simulation_setting
+        (store_id, month, property_fee, electricity_fee, rent, water_fee, network_fee, other_fee)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+       ON DUPLICATE KEY UPDATE
+         property_fee    = VALUES(property_fee),
+         electricity_fee = VALUES(electricity_fee),
+         rent            = VALUES(rent),
+         water_fee       = VALUES(water_fee),
+         network_fee     = VALUES(network_fee),
+         other_fee       = VALUES(other_fee)`,
+      [
+        storeId,
+        toMonth,
+        toNumOrZero(s.property_fee),
+        toNumOrZero(s.electricity_fee),
+        toNumOrZero(s.rent),
+        toNumOrZero(s.water_fee),
+        toNumOrZero(s.network_fee),
+        toNumOrZero(s.other_fee),
+      ]
+    );
+
+    console.log(`[copy-sim] ${storeId}: ${fromMonth} → ${toMonth}`);
+    res.json({ errorcode: 0, data: { copied: true } });
   } catch (e) {
     console.error(e);
     res.status(500).json({ errorcode: 500, errormsg: e.message });
