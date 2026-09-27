@@ -42,12 +42,13 @@ const pool = mysql.createPool({
  * ============================================================ */
 async function ensureTables() {
   const sqls = [
-    /* 管理员账号 */
+    /* 管理员账号（带 role） */
     `CREATE TABLE IF NOT EXISTS admin_user (
       id            BIGINT PRIMARY KEY AUTO_INCREMENT,
       username      VARCHAR(64)  NOT NULL UNIQUE,
       password_hash VARCHAR(255) NOT NULL,
       display_name  VARCHAR(64),
+      role          VARCHAR(16)  NOT NULL DEFAULT 'user',
       created_at    DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
       updated_at    DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`,
@@ -159,26 +160,48 @@ async function ensureTables() {
   for (const sql of sqls) {
     await pool.query(sql);
   }
+
+  /* ⭐ 兼容旧表：如果没有 role 列，则加上 */
+  const [cols] = await pool.query(
+    `SELECT COLUMN_NAME FROM INFORMATION_SCHEMA.COLUMNS
+      WHERE TABLE_SCHEMA = ? AND TABLE_NAME = 'admin_user' AND COLUMN_NAME = 'role'`,
+    [process.env.DB_NAME || 'gym_payroll']
+  );
+  if (cols.length === 0) {
+    await pool.query(
+      `ALTER TABLE admin_user ADD COLUMN role VARCHAR(16) NOT NULL DEFAULT 'user'`
+    );
+    console.log('[db] 已为 admin_user 添加 role 列');
+  }
+
   console.log('[db] tables ready');
 }
 
 /* ============================================================
- * 4) 默认管理员
+ * 4) 默认超管
  * ============================================================ */
 async function seedAdmin() {
   const [rows] = await pool.query(`SELECT COUNT(*) AS c FROM admin_user`);
-  if (rows[0].c > 0) return;
+  if (rows[0].c > 0) {
+    /* 如果库中已存在 admin，确保它是超级管理员 */
+    await pool.query(
+      `UPDATE admin_user SET role = 'admin' WHERE username = ?`,
+      [process.env.ADMIN_USERNAME || 'admin']
+    );
+    return;
+  }
 
   const defaultUsername = process.env.ADMIN_USERNAME || 'admin';
   const defaultPassword = process.env.ADMIN_PASSWORD || 'admin123';
   const hash = await bcrypt.hash(defaultPassword, 10);
 
   await pool.query(
-    `INSERT INTO admin_user (username, password_hash, display_name) VALUES (?, ?, ?)`,
-    [defaultUsername, hash, '管理员']
+    `INSERT INTO admin_user (username, password_hash, display_name, role)
+     VALUES (?, ?, ?, 'admin')`,
+    [defaultUsername, hash, '超级管理员']
   );
   console.log(
-    `[db] 已创建默认管理员 ${defaultUsername} / ${defaultPassword}（请登录后修改）`
+    `[db] 已创建默认超级管理员 ${defaultUsername} / ${defaultPassword}（请登录后修改）`
   );
 }
 
