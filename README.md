@@ -1,0 +1,1 @@
+.env PORT=4000 FRONTEND_ORIGIN=http://localhost:5173 TARGET_BASE=https://wx.rocketbird.cn
