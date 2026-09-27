@@ -10,6 +10,15 @@ module.exports = {
     login: `${TARGET}/Web/Public/check_login`,
     staffs: `${TARGET}/Web/SalaryRule/get_salary_rule_list`,
 
+    /* 场馆切换 */
+    cutover: `${TARGET}/Admin/Cutover/ajax_cutover`,
+
+    /* ⭐ 运营团队 */
+    marketers: `${TARGET}/Web/Marketers/get_marketers_list`,
+
+    /* 教练列表 */
+    busCoachList: `${TARGET}/Web/Coach/get_bus_coach_list`,
+
     /* 售卡售课 */
     membership: `${TARGET}/Web/Statistics/membership_statistics`,
     swimmingCoach: `${TARGET}/Web/Statistics/swimming_coach_statistics`,
