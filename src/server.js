@@ -4,14 +4,14 @@ const cors = require('cors');
 const cookieParser = require('cookie-parser');
 const bodyParser = require('body-parser');
 const { PORT, FRONTEND_ORIGIN } = require('./config');
-const { initDatabase } = require('./server/db');
+const { initDatabase } = require('./db');
 
 const authRoutes = require('./routes/auth');
 const classStatsRoutes = require('./routes/classStats');
 const cutoverRoutes = require('./routes/cutover');
 const coachRoutes = require('./routes/coach');
 const marketersRoutes = require('./routes/marketers');
-const compensationRoutes = require('./server/routes/compensation');
+const compensationRoutes = require('./routes/compensation');
 const adminAuthRoutes = require('./routes/adminAuth');   // ⭐ 新增
 
 const app = express();

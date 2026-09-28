@@ -12,7 +12,6 @@ const { pool } = require('../db');
 function toJson(v) {
   if (v == null || v === '') return null;
 
-  /* 字符串处理 */
   if (typeof v === 'string') {
     const s = v.trim();
     if (s === '') return null;
@@ -24,9 +23,8 @@ function toJson(v) {
     }
   }
 
-  /* 对象/数组 → 序列化成字符串（关键修复：不再返回对象本身） */
   try {
-    return JSON.stringify(v);
+    return JSON.stringify(v);       // 对象/数组 → 序列化字符串
   } catch {
     return null;
   }
@@ -54,6 +52,7 @@ function toStr(v) {
 
 /* ============================================================
  * 列表：某门店所有方案
+ * GET /api/compensation/plans?store_id=xxx
  * ============================================================ */
 router.get('/compensation/plans', async (req, res) => {
   try {
@@ -77,7 +76,8 @@ router.get('/compensation/plans', async (req, res) => {
 });
 
 /* ============================================================
- * 详情
+ * 详情：按门店 + 月份
+ * GET /api/compensation/plan?store_id=xxx&month=2026-08
  * ============================================================ */
 router.get('/compensation/plan', async (req, res) => {
   try {
@@ -85,6 +85,7 @@ router.get('/compensation/plan', async (req, res) => {
     if (!store_id || !month) {
       return res.status(400).json({ errorcode: 400, errormsg: 'store_id & month required' });
     }
+
     const [plans] = await pool.query(
       `SELECT * FROM monthly_compensation_plan WHERE store_id = ? AND month = ?`,
       [store_id, month]
@@ -146,7 +147,7 @@ router.get('/compensation/plan', async (req, res) => {
       p.performanceTarget = Number(p.performance_target);
       p.totalBaseSalary = Number(p.total_base_salary);
 
-      /* calc_flags 从数据库读出来是字符串，parse 成对象返回给前端 */
+      /* calc_flags 从数据库读出来是字符串，parse 成对象后返回给前端 */
       if (p.calc_flags != null) {
         if (typeof p.calc_flags === 'string') {
           try {
@@ -178,6 +179,8 @@ router.get('/compensation/plan', async (req, res) => {
 
 /* ============================================================
  * 保存（新增或覆盖）
+ * POST /api/compensation/plan
+ * body: { storeId, month, periodLabel, positions: [...] }
  * ============================================================ */
 router.post('/compensation/plan', async (req, res) => {
   const conn = await pool.getConnection();
@@ -290,7 +293,8 @@ router.post('/compensation/plan', async (req, res) => {
 });
 
 /* ============================================================
- * 删除
+ * 删除方案（同时清掉对应的测算设置）
+ * DELETE /api/compensation/plan?store_id=xxx&month=2026-08
  * ============================================================ */
 router.delete('/compensation/plan', async (req, res) => {
   try {
@@ -298,14 +302,23 @@ router.delete('/compensation/plan', async (req, res) => {
     if (!store_id || !month) {
       return res.status(400).json({ errorcode: 400, errormsg: 'store_id & month required' });
     }
+
     const [plans] = await pool.query(
       `SELECT id FROM monthly_compensation_plan WHERE store_id = ? AND month = ?`,
       [store_id, month]
     );
-    if (plans.length === 0) return res.json({ errorcode: 0, data: null });
 
-    await pool.query(`DELETE FROM position_config WHERE plan_id = ?`, [plans[0].id]);
-    await pool.query(`DELETE FROM monthly_compensation_plan WHERE id = ?`, [plans[0].id]);
+    if (plans.length > 0) {
+      await pool.query(`DELETE FROM position_config WHERE plan_id = ?`, [plans[0].id]);
+      await pool.query(`DELETE FROM monthly_compensation_plan WHERE id = ?`, [plans[0].id]);
+    }
+
+    /* ⭐ 一并删掉对应的测算设置 */
+    await pool.query(
+      `DELETE FROM simulation_setting WHERE store_id = ? AND month = ?`,
+      [store_id, month]
+    );
+
     res.json({ errorcode: 0 });
   } catch (e) {
     console.error(e);
@@ -314,7 +327,9 @@ router.delete('/compensation/plan', async (req, res) => {
 });
 
 /* ============================================================
- * 复制方案
+ * 复制方案：fromMonth → toMonth
+ * POST /api/compensation/plan/copy
+ * body: { storeId, fromMonth, toMonth }
  * ============================================================ */
 router.post('/compensation/plan/copy', async (req, res) => {
   const conn = await pool.getConnection();
@@ -377,13 +392,11 @@ router.post('/compensation/plan/copy', async (req, res) => {
           toStr(p.extra_note),
           toStr(p.class_commission_mode),
           toNum(p.old_class_fee),
-          /* ⭐ 修复：calc_flags 从数据库读到字符串，toJson 会原样返回或包成 JSON */
           toJson(p.calc_flags),
         ]
       );
       const newPosId = newPos.insertId;
 
-      /* 佣金阶梯 */
       const [ct] = await conn.query(`SELECT * FROM commission_tier WHERE position_id = ?`, [p.id]);
       for (const t of ct) {
         await conn.query(
@@ -400,7 +413,6 @@ router.post('/compensation/plan/copy', async (req, res) => {
         );
       }
 
-      /* 底薪阶梯 */
       const [bt] = await conn.query(`SELECT * FROM base_salary_tier WHERE position_id = ?`, [p.id]);
       for (const t of bt) {
         await conn.query(
@@ -409,7 +421,6 @@ router.post('/compensation/plan/copy', async (req, res) => {
         );
       }
 
-      /* 性别底薪阶梯 */
       const [gt] = await conn.query(`SELECT * FROM gender_salary_tier WHERE position_id = ?`, [p.id]);
       for (const t of gt) {
         await conn.query(
@@ -427,7 +438,6 @@ router.post('/compensation/plan/copy', async (req, res) => {
         );
       }
 
-      /* 课程提成 */
       const [cc] = await conn.query(`SELECT * FROM course_commission WHERE position_id = ?`, [p.id]);
       for (const c of cc) {
         await conn.query(
@@ -437,7 +447,6 @@ router.post('/compensation/plan/copy', async (req, res) => {
         );
       }
 
-      /* 老课费用阶梯 */
       const [of] = await conn.query(`SELECT * FROM old_class_fee_tier WHERE position_id = ?`, [p.id]);
       for (const o of of) {
         await conn.query(
@@ -460,7 +469,8 @@ router.post('/compensation/plan/copy', async (req, res) => {
 });
 
 /* ============================================================
- * 初始化门店
+ * 初始化门店：无方案时预置上月 + 当月空方案
+ * POST /api/compensation/init
  * ============================================================ */
 router.post('/compensation/init', async (req, res) => {
   const conn = await pool.getConnection();
@@ -513,6 +523,7 @@ router.post('/compensation/init', async (req, res) => {
 
 /* ============================================================
  * 测算设置：读取
+ * GET /api/simulation/setting?store_id=xxx&month=xxx
  * ============================================================ */
 router.get('/simulation/setting', async (req, res) => {
   try {
@@ -558,7 +569,9 @@ router.get('/simulation/setting', async (req, res) => {
 });
 
 /* ============================================================
- * 测算设置：保存
+ * 测算设置：保存（upsert）
+ * POST /api/simulation/setting
+ * body: { storeId, month, input: { propertyFee, ... } }
  * ============================================================ */
 router.post('/simulation/setting', async (req, res) => {
   try {
@@ -606,7 +619,9 @@ router.post('/simulation/setting', async (req, res) => {
 });
 
 /* ============================================================
- * 复制测算设置
+ * 复制测算设置：fromMonth → toMonth
+ * POST /api/simulation/setting/copy
+ * body: { storeId, fromMonth, toMonth }
  * ============================================================ */
 router.post('/simulation/setting/copy', async (req, res) => {
   try {

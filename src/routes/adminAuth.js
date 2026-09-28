@@ -2,7 +2,7 @@ const express = require('express');
 const router = express.Router();
 const bcrypt = require('bcrypt');
 const jwt = require('jsonwebtoken');
-const { pool } = require('../server/db');
+const { pool } = require('../db');
 
 const JWT_SECRET = process.env.JWT_SECRET || 'change_this_secret_in_production';
 const TOKEN_EXPIRES = '30d';
@@ -40,6 +40,72 @@ async function adminOnly(req, res, next) {
     res.status(500).json({ errorcode: 500, errormsg: e.message });
   }
 }
+
+/* ============================================================
+ * ⭐ 初始化状态检查（仅查询，不修改）
+ * GET /api/admin/init-status
+ * ============================================================ */
+router.get('/admin/init-status', async (req, res) => {
+  try {
+    /* 1) 数据库表存在吗？ */
+    const [tables] = await pool.query(
+      `SELECT COUNT(*) AS c
+         FROM INFORMATION_SCHEMA.TABLES
+        WHERE TABLE_SCHEMA = ?
+          AND TABLE_NAME = 'admin_user'`,
+      [process.env.DB_NAME || 'gym_payroll']
+    );
+
+    if (tables[0].c === 0) {
+      return res.json({
+        errorcode: 0,
+        data: { initialized: false, reason: 'no_table', adminCount: 0 },
+      });
+    }
+
+    /* 2) 表里有没有用户？ */
+    const [rows] = await pool.query(`SELECT COUNT(*) AS c FROM admin_user`);
+    const adminCount = rows[0].c;
+
+    if (adminCount === 0) {
+      return res.json({
+        errorcode: 0,
+        data: { initialized: false, reason: 'no_admin', adminCount: 0 },
+      });
+    }
+
+    res.json({
+      errorcode: 0,
+      data: { initialized: true, adminCount },
+    });
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ errorcode: 500, errormsg: e.message });
+  }
+});
+
+/* ============================================================
+ * ⭐ 主动初始化（建库 + 建表 + 创建默认管理员，幂等）
+ * POST /api/admin/init
+ * ============================================================ */
+router.post('/admin/init', async (req, res) => {
+  try {
+    const { initDatabase } = require('../db');
+    await initDatabase();
+    const [rows] = await pool.query(`SELECT COUNT(*) AS c FROM admin_user`);
+    res.json({
+      errorcode: 0,
+      data: {
+        initialized: true,
+        adminCount: rows[0].c,
+        message: '数据库已初始化完成',
+      },
+    });
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ errorcode: 500, errormsg: e.message });
+  }
+});
 
 /* ============================================================
  * 登录
@@ -280,7 +346,7 @@ router.delete('/admin/users/:id', authRequired, adminOnly, async (req, res) => {
 });
 
 /* ============================================================
- * ⭐ 重置用户密码（仅超管）
+ * 重置用户密码（仅超管）
  * ============================================================ */
 router.post(
   '/admin/users/:id/reset-password',
