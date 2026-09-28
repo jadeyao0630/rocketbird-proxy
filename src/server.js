@@ -12,15 +12,23 @@ const cutoverRoutes = require('./routes/cutover');
 const coachRoutes = require('./routes/coach');
 const marketersRoutes = require('./routes/marketers');
 const compensationRoutes = require('./routes/compensation');
-const adminAuthRoutes = require('./routes/adminAuth');   // ⭐ 新增
+const adminAuthRoutes = require('./routes/adminAuth');
+const cardRoutes = require('./routes/card');               // ⭐ 新增
 
 const app = express();
 
-app.use(cors({ origin: FRONTEND_ORIGIN, credentials: true, optionsSuccessStatus: 200 }));
+app.use(
+  cors({
+    origin: FRONTEND_ORIGIN,
+    credentials: true,
+    optionsSuccessStatus: 200,
+  })
+);
 app.use(bodyParser.urlencoded({ extended: true }));
 app.use(bodyParser.json());
 app.use(cookieParser());
 
+/* 日志 */
 app.use((req, res, next) => {
   const start = Date.now();
   res.on('finish', () => {
@@ -31,18 +39,22 @@ app.use((req, res, next) => {
   next();
 });
 
+/* 路由 */
 app.use('/api', authRoutes);
 app.use('/api', classStatsRoutes);
 app.use('/api', cutoverRoutes);
 app.use('/api', coachRoutes);
 app.use('/api', marketersRoutes);
 app.use('/api', compensationRoutes);
-app.use('/api', adminAuthRoutes);   // ⭐ 新增
+app.use('/api', adminAuthRoutes);
+app.use('/api', cardRoutes);                                // ⭐ 新增
 
+/* 健康检查 */
 app.get('/health', (req, res) => {
   res.json({ ok: true, time: new Date().toISOString() });
 });
 
+/* 404 */
 app.use((req, res) => {
   res.status(404).json({ error: 'Not Found', path: req.originalUrl });
 });

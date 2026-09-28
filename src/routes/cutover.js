@@ -22,14 +22,25 @@ router.post('/cutover', async (req, res) => {
     params.append('bus_id', busId);
 
     const response = await http.post(UPSTREAM.cutover, params, {
-      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      headers: {
+        'Content-Type': 'application/x-www-form-urlencoded',
+        Referer: 'https://vip.rocketbird.cn',
+        Origin: 'https://vip.rocketbird.cn',
+      },
     });
 
-    console.log('[cutover] 响应 status =', response.status, 'data =', response.data);
+    console.log(
+      '[cutover] 响应 status =',
+      response.status,
+      'data =',
+      response.data
+    );
     res.status(response.status).json(response.data);
   } catch (err) {
     console.error('[cutover] 出错:', err.message);
-    res.status(502).json({ error: 'Cutover proxy failed', message: err.message });
+    res
+      .status(502)
+      .json({ error: 'Cutover proxy failed', message: err.message });
   }
 });
 

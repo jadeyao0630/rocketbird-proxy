@@ -42,7 +42,7 @@ const pool = mysql.createPool({
  * ============================================================ */
 async function ensureTables() {
   const sqls = [
-    /* 管理员账号（带 role） */
+    /* 管理员账号 */
     `CREATE TABLE IF NOT EXISTS admin_user (
       id            BIGINT PRIMARY KEY AUTO_INCREMENT,
       username      VARCHAR(64)  NOT NULL UNIQUE,
@@ -82,6 +82,7 @@ async function ensureTables() {
       class_commission_mode VARCHAR(16),
       old_class_fee         DECIMAL(10,2),
       calc_flags            JSON,
+      disabled              TINYINT(1)   NOT NULL DEFAULT 0,
       FOREIGN KEY (plan_id) REFERENCES monthly_compensation_plan(id) ON DELETE CASCADE
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`,
 
@@ -161,20 +162,27 @@ async function ensureTables() {
     await pool.query(sql);
   }
 
-  /* ⭐ 兼容旧表：如果没有 role 列，则加上 */
-  const [cols] = await pool.query(
-    `SELECT COLUMN_NAME FROM INFORMATION_SCHEMA.COLUMNS
-      WHERE TABLE_SCHEMA = ? AND TABLE_NAME = 'admin_user' AND COLUMN_NAME = 'role'`,
-    [process.env.DB_NAME || 'gym_payroll']
-  );
-  if (cols.length === 0) {
-    await pool.query(
-      `ALTER TABLE admin_user ADD COLUMN role VARCHAR(16) NOT NULL DEFAULT 'user'`
-    );
-    console.log('[db] 已为 admin_user 添加 role 列');
-  }
+  /* ⭐ 兼容旧表：如果某些列不存在，自动加 */
+  await ensureColumn('position_config', 'disabled', `TINYINT(1) NOT NULL DEFAULT 0`);
+  await ensureColumn('admin_user', 'role', `VARCHAR(16) NOT NULL DEFAULT 'user'`);
 
   console.log('[db] tables ready');
+}
+
+/* ============================================================
+ * ⭐ 工具：如果列不存在则 ALTER TABLE 加列
+ * ============================================================ */
+async function ensureColumn(table, column, definition) {
+  const dbName = process.env.DB_NAME || 'gym_payroll';
+  const [cols] = await pool.query(
+    `SELECT COLUMN_NAME FROM INFORMATION_SCHEMA.COLUMNS
+      WHERE TABLE_SCHEMA = ? AND TABLE_NAME = ? AND COLUMN_NAME = ?`,
+    [dbName, table, column]
+  );
+  if (cols.length === 0) {
+    await pool.query(`ALTER TABLE \`${table}\` ADD COLUMN \`${column}\` ${definition}`);
+    console.log(`[db] 已为 ${table} 添加列 ${column}`);
+  }
 }
 
 /* ============================================================
@@ -183,7 +191,6 @@ async function ensureTables() {
 async function seedAdmin() {
   const [rows] = await pool.query(`SELECT COUNT(*) AS c FROM admin_user`);
   if (rows[0].c > 0) {
-    /* 如果库中已存在 admin，确保它是超级管理员 */
     await pool.query(
       `UPDATE admin_user SET role = 'admin' WHERE username = ?`,
       [process.env.ADMIN_USERNAME || 'admin']

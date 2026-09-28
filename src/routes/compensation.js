@@ -6,53 +6,53 @@ const { pool } = require('../db');
  * 工具：字段类型兜底
  * ============================================================ */
 
-/** JSON 列：对象/数组 → JSON 字符串；合法 JSON 字符串 → 原样；
- *  非法字符串 → 包成 JSON 字符串；null/'' → null
- */
 function toJson(v) {
   if (v == null || v === '') return null;
-
   if (typeof v === 'string') {
     const s = v.trim();
     if (s === '') return null;
     try {
       JSON.parse(s);
-      return s;              // 合法 JSON 字符串，原样返回
+      return s;
     } catch {
-      return JSON.stringify(s);   // 非法 JSON 字符串，包成 JSON 字符串
+      return JSON.stringify(s);
     }
   }
-
   try {
-    return JSON.stringify(v);       // 对象/数组 → 序列化字符串
+    return JSON.stringify(v);
   } catch {
     return null;
   }
 }
 
-/** 数字列：null/空串 → null；否则 Number；NaN → null */
 function toNum(v) {
   if (v == null || v === '') return null;
   const n = Number(v);
   return Number.isFinite(n) ? n : null;
 }
 
-/** 数字列：null/空串 → 0 */
 function toNumOrZero(v) {
   const n = toNum(v);
   return n == null ? 0 : n;
 }
 
-/** 字符串列：null/空串 → null */
 function toStr(v) {
   if (v == null) return null;
   const s = String(v).trim();
   return s === '' ? null : s;
 }
 
+function toStrOr(v, fallback) {
+  return toStr(v) || fallback;
+}
+
+/** ⭐ 布尔转 0/1 */
+function toBit(v) {
+  return v ? 1 : 0;
+}
+
 /* ============================================================
  * 列表：某门店所有方案
- * GET /api/compensation/plans?store_id=xxx
  * ============================================================ */
 router.get('/compensation/plans', async (req, res) => {
   try {
@@ -76,8 +76,7 @@ router.get('/compensation/plans', async (req, res) => {
 });
 
 /* ============================================================
- * 详情：按门店 + 月份
- * GET /api/compensation/plan?store_id=xxx&month=2026-08
+ * 详情
  * ============================================================ */
 router.get('/compensation/plan', async (req, res) => {
   try {
@@ -147,7 +146,10 @@ router.get('/compensation/plan', async (req, res) => {
       p.performanceTarget = Number(p.performance_target);
       p.totalBaseSalary = Number(p.total_base_salary);
 
-      /* calc_flags 从数据库读出来是字符串，parse 成对象后返回给前端 */
+      /* ⭐ disabled 转 boolean */
+      p.disabled = !!p.disabled;
+
+      /* calc_flags */
       if (p.calc_flags != null) {
         if (typeof p.calc_flags === 'string') {
           try {
@@ -179,8 +181,6 @@ router.get('/compensation/plan', async (req, res) => {
 
 /* ============================================================
  * 保存（新增或覆盖）
- * POST /api/compensation/plan
- * body: { storeId, month, periodLabel, positions: [...] }
  * ============================================================ */
 router.post('/compensation/plan', async (req, res) => {
   const conn = await pool.getConnection();
@@ -213,11 +213,11 @@ router.post('/compensation/plan', async (req, res) => {
       const [pr] = await conn.query(
         `INSERT INTO position_config
           (plan_id, title, category, headcount, performance_target, performance_source,
-           total_base_salary, extra_note, class_commission_mode, old_class_fee, calc_flags)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+           total_base_salary, extra_note, class_commission_mode, old_class_fee, calc_flags, disabled)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         [
           planId,
-          toStr(p.title),
+          toStrOr(p.title, '未命名职位'),
           toStr(p.category),
           toNumOrZero(p.headcount),
           toNumOrZero(p.performanceTarget),
@@ -227,6 +227,7 @@ router.post('/compensation/plan', async (req, res) => {
           toStr(p.classCommissionMode),
           toNum(p.oldClassFee),
           toJson(p.calcFlags),
+          toBit(p.disabled),      // ⭐ disabled
         ]
       );
       const posId = pr.insertId;
@@ -245,12 +246,14 @@ router.post('/compensation/plan', async (req, res) => {
           ]
         );
       }
+
       for (const t of p.baseSalaryTiers || []) {
         await conn.query(
           `INSERT INTO base_salary_tier (position_id, threshold, amount, note) VALUES (?, ?, ?, ?)`,
           [posId, toNumOrZero(t.threshold), toNumOrZero(t.amount), toStr(t.note)]
         );
       }
+
       for (const t of p.genderSalaryTiers || []) {
         await conn.query(
           `INSERT INTO gender_salary_tier (position_id, threshold, male, female, newbie, base, note)
@@ -266,13 +269,21 @@ router.post('/compensation/plan', async (req, res) => {
           ]
         );
       }
+
       for (const c of p.courseCommissions || []) {
+        const courseName = toStr(c.courseName) || toStr(c.course_name);
+        if (!courseName) {
+          console.warn(`[warn] 跳过空 course_name，position=${p.title}`);
+          continue;
+        }
+        const mode = toStr(c.mode) || 'percent';
         await conn.query(
           `INSERT INTO course_commission (position_id, course_name, mode, value, note)
            VALUES (?, ?, ?, ?, ?)`,
-          [posId, toStr(c.courseName), toStr(c.mode), toNumOrZero(c.value), toStr(c.note)]
+          [posId, courseName, mode, toNumOrZero(c.value), toStr(c.note)]
         );
       }
+
       for (const o of p.oldClassFees || []) {
         await conn.query(
           `INSERT INTO old_class_fee_tier (position_id, threshold, fee, note) VALUES (?, ?, ?, ?)`,
@@ -293,8 +304,7 @@ router.post('/compensation/plan', async (req, res) => {
 });
 
 /* ============================================================
- * 删除方案（同时清掉对应的测算设置）
- * DELETE /api/compensation/plan?store_id=xxx&month=2026-08
+ * 删除方案
  * ============================================================ */
 router.delete('/compensation/plan', async (req, res) => {
   try {
@@ -302,23 +312,18 @@ router.delete('/compensation/plan', async (req, res) => {
     if (!store_id || !month) {
       return res.status(400).json({ errorcode: 400, errormsg: 'store_id & month required' });
     }
-
     const [plans] = await pool.query(
       `SELECT id FROM monthly_compensation_plan WHERE store_id = ? AND month = ?`,
       [store_id, month]
     );
-
     if (plans.length > 0) {
       await pool.query(`DELETE FROM position_config WHERE plan_id = ?`, [plans[0].id]);
       await pool.query(`DELETE FROM monthly_compensation_plan WHERE id = ?`, [plans[0].id]);
     }
-
-    /* ⭐ 一并删掉对应的测算设置 */
     await pool.query(
       `DELETE FROM simulation_setting WHERE store_id = ? AND month = ?`,
       [store_id, month]
     );
-
     res.json({ errorcode: 0 });
   } catch (e) {
     console.error(e);
@@ -327,9 +332,7 @@ router.delete('/compensation/plan', async (req, res) => {
 });
 
 /* ============================================================
- * 复制方案：fromMonth → toMonth
- * POST /api/compensation/plan/copy
- * body: { storeId, fromMonth, toMonth }
+ * 复制方案
  * ============================================================ */
 router.post('/compensation/plan/copy', async (req, res) => {
   const conn = await pool.getConnection();
@@ -379,11 +382,11 @@ router.post('/compensation/plan/copy', async (req, res) => {
       const [newPos] = await conn.query(
         `INSERT INTO position_config
           (plan_id, title, category, headcount, performance_target, performance_source,
-           total_base_salary, extra_note, class_commission_mode, old_class_fee, calc_flags)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+           total_base_salary, extra_note, class_commission_mode, old_class_fee, calc_flags, disabled)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         [
           newPlanId,
-          toStr(p.title),
+          toStrOr(p.title, '未命名职位'),
           toStr(p.category),
           toNumOrZero(p.headcount),
           toNumOrZero(p.performance_target),
@@ -393,6 +396,7 @@ router.post('/compensation/plan/copy', async (req, res) => {
           toStr(p.class_commission_mode),
           toNum(p.old_class_fee),
           toJson(p.calc_flags),
+          toBit(p.disabled),      // ⭐ disabled
         ]
       );
       const newPosId = newPos.insertId;
@@ -440,10 +444,16 @@ router.post('/compensation/plan/copy', async (req, res) => {
 
       const [cc] = await conn.query(`SELECT * FROM course_commission WHERE position_id = ?`, [p.id]);
       for (const c of cc) {
+        const courseName = toStr(c.course_name) || toStr(c.courseName);
+        if (!courseName) {
+          console.warn(`[warn] copy 跳过空 course_name，position=${p.title}`);
+          continue;
+        }
+        const mode = toStr(c.mode) || 'percent';
         await conn.query(
           `INSERT INTO course_commission (position_id, course_name, mode, value, note)
            VALUES (?, ?, ?, ?, ?)`,
-          [newPosId, toStr(c.course_name), toStr(c.mode), toNumOrZero(c.value), toStr(c.note)]
+          [newPosId, courseName, mode, toNumOrZero(c.value), toStr(c.note)]
         );
       }
 
@@ -469,8 +479,7 @@ router.post('/compensation/plan/copy', async (req, res) => {
 });
 
 /* ============================================================
- * 初始化门店：无方案时预置上月 + 当月空方案
- * POST /api/compensation/init
+ * 初始化门店
  * ============================================================ */
 router.post('/compensation/init', async (req, res) => {
   const conn = await pool.getConnection();
@@ -523,7 +532,6 @@ router.post('/compensation/init', async (req, res) => {
 
 /* ============================================================
  * 测算设置：读取
- * GET /api/simulation/setting?store_id=xxx&month=xxx
  * ============================================================ */
 router.get('/simulation/setting', async (req, res) => {
   try {
@@ -569,9 +577,7 @@ router.get('/simulation/setting', async (req, res) => {
 });
 
 /* ============================================================
- * 测算设置：保存（upsert）
- * POST /api/simulation/setting
- * body: { storeId, month, input: { propertyFee, ... } }
+ * 测算设置：保存
  * ============================================================ */
 router.post('/simulation/setting', async (req, res) => {
   try {
@@ -619,9 +625,7 @@ router.post('/simulation/setting', async (req, res) => {
 });
 
 /* ============================================================
- * 复制测算设置：fromMonth → toMonth
- * POST /api/simulation/setting/copy
- * body: { storeId, fromMonth, toMonth }
+ * 复制测算设置
  * ============================================================ */
 router.post('/simulation/setting/copy', async (req, res) => {
   try {
