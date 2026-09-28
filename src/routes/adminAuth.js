@@ -3,6 +3,7 @@ const router = express.Router();
 const bcrypt = require('bcrypt');
 const jwt = require('jsonwebtoken');
 const { pool } = require('../db');
+const { parseStoreIds } = require('./adminPermissions'); // ⭐
 
 const JWT_SECRET = process.env.JWT_SECRET || 'change_this_secret_in_production';
 const TOKEN_EXPIRES = '30d';
@@ -47,7 +48,6 @@ async function adminOnly(req, res, next) {
  * ============================================================ */
 router.get('/admin/init-status', async (req, res) => {
   try {
-    /* 1) 数据库表存在吗？ */
     const [tables] = await pool.query(
       `SELECT COUNT(*) AS c
          FROM INFORMATION_SCHEMA.TABLES
@@ -63,7 +63,6 @@ router.get('/admin/init-status', async (req, res) => {
       });
     }
 
-    /* 2) 表里有没有用户？ */
     const [rows] = await pool.query(`SELECT COUNT(*) AS c FROM admin_user`);
     const adminCount = rows[0].c;
 
@@ -157,7 +156,7 @@ router.post('/admin/login', async (req, res) => {
 });
 
 /* ============================================================
- * 校验 token
+ * 校验 token + ⭐ 返回权限
  * ============================================================ */
 router.get('/admin/me', async (req, res) => {
   try {
@@ -183,6 +182,19 @@ router.get('/admin/me', async (req, res) => {
     }
     const user = rows[0];
 
+    /* ⭐ 顺带返回权限（超管返回空数组） */
+    let permissions = [];
+    if (user.role !== 'admin') {
+      const [ps] = await pool.query(
+        `SELECT permission, store_ids FROM user_permission WHERE user_id = ?`,
+        [user.id]
+      );
+      permissions = ps.map((r) => ({
+        permission: r.permission,
+        storeIds: parseStoreIds(r.store_ids),
+      }));
+    }
+
     res.json({
       errorcode: 0,
       data: {
@@ -192,6 +204,7 @@ router.get('/admin/me', async (req, res) => {
           displayName: user.display_name,
           role: user.role || 'user',
         },
+        permissions,   // ⭐
       },
     });
   } catch (e) {
@@ -261,6 +274,7 @@ router.get('/admin/users', authRequired, adminOnly, async (req, res) => {
 
 /* ============================================================
  * 新增用户（仅超管，新增的是普通用户）
+ * ⭐ 新增时初始化一条默认权限 plan:view（全部门店）
  * ============================================================ */
 router.post('/admin/users', authRequired, adminOnly, async (req, res) => {
   try {
@@ -294,6 +308,15 @@ router.post('/admin/users', authRequired, adminOnly, async (req, res) => {
       [u, hash, display]
     );
 
+    /* ⭐ 初始化默认权限：plan:view（全部门店）
+     * 如果希望新用户无任何权限，删掉这段 INSERT 即可
+     */
+    await pool.query(
+      `INSERT INTO user_permission (user_id, permission, store_ids, granted_by)
+       VALUES (?, 'plan:view', '[]', ?)`,
+      [r.insertId, req.user.uid]
+    );
+
     console.log(`[auth] 管理员 ${req.user.username} 新增用户 ${u}`);
     res.json({
       errorcode: 0,
@@ -312,6 +335,7 @@ router.post('/admin/users', authRequired, adminOnly, async (req, res) => {
 
 /* ============================================================
  * 删除用户（仅超管；不能删自己，不能删其他超管）
+ * ⭐ 外键 ON DELETE CASCADE 会自动清 user_permission
  * ============================================================ */
 router.delete('/admin/users/:id', authRequired, adminOnly, async (req, res) => {
   try {
@@ -375,7 +399,6 @@ router.post(
         return res.status(404).json({ errorcode: 404, errormsg: '用户不存在' });
       }
 
-      /* 不允许重置其他超管的密码（可以重置自己） */
       if (rows[0].role === 'admin' && targetId !== req.user.uid) {
         return res.status(400).json({ errorcode: 400, errormsg: '不能重置其他超级管理员的密码' });
       }

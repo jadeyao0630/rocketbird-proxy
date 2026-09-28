@@ -1,11 +1,33 @@
 const express = require('express');
 const router = express.Router();
+const jwt = require('jsonwebtoken');
 const { pool } = require('../db');
+const { userHasPermission } = require('./adminPermissions');
+
+const JWT_SECRET =
+  process.env.JWT_SECRET || 'change_this_secret_in_production';
+
+/* 软解析 token */
+function tryAuth(req) {
+  const auth = req.headers.authorization || '';
+  const token = auth.startsWith('Bearer ') ? auth.slice(7) : '';
+  if (!token) return null;
+  try {
+    return jwt.verify(token, JWT_SECRET);
+  } catch {
+    return null;
+  }
+}
+
+async function requirePlanEdit(req, storeId) {
+  const user = tryAuth(req);
+  if (!user) return true;
+  return await userHasPermission(user.uid, 'plan:edit', storeId);
+}
 
 /* ============================================================
  * 工具：字段类型兜底
  * ============================================================ */
-
 function toJson(v) {
   if (v == null || v === '') return null;
   if (typeof v === 'string') {
@@ -24,31 +46,51 @@ function toJson(v) {
     return null;
   }
 }
-
 function toNum(v) {
   if (v == null || v === '') return null;
   const n = Number(v);
   return Number.isFinite(n) ? n : null;
 }
-
 function toNumOrZero(v) {
   const n = toNum(v);
   return n == null ? 0 : n;
 }
-
 function toStr(v) {
   if (v == null) return null;
   const s = String(v).trim();
   return s === '' ? null : s;
 }
-
 function toStrOr(v, fallback) {
   return toStr(v) || fallback;
 }
-
-/** ⭐ 布尔转 0/1 */
 function toBit(v) {
   return v ? 1 : 0;
+}
+
+/* ============================================================
+ * ⭐ 兜底：没有运营主管时动态补一个
+ * ============================================================ */
+function ensureOpsManager(positions) {
+  if (!Array.isArray(positions)) return positions;
+  if (positions.some((p) => p && p.title === '运营主管')) return positions;
+
+  positions.push({
+    id: 'virtual_运营主管',
+    title: '运营主管',
+    category: 'operations',
+    headcount: 1,
+    performanceTarget: 0,
+    performanceSource: 'self',
+    totalBaseSalary: 0,
+    commissionTiers: [
+      { id: 'virtual_ops_tier_0', threshold: 0, rate: 0.03, note: '店长销售 × 3%' },
+    ],
+    baseSalaryTiers: [
+      { id: 'virtual_ops_base_0', threshold: 0, amount: 20000, note: '固定底薪' },
+    ],
+    extraNote: '佣金 = 店长销售 × 3%',
+  });
+  return positions;
 }
 
 /* ============================================================
@@ -146,10 +188,11 @@ router.get('/compensation/plan', async (req, res) => {
       p.performanceTarget = Number(p.performance_target);
       p.totalBaseSalary = Number(p.total_base_salary);
 
-      /* ⭐ disabled 转 boolean */
       p.disabled = !!p.disabled;
+      p.managerAggregateByDept = !!p.manager_aggregate_by_dept;
+      p.commissionTiered = p.commission_tiered !== 0;
+      p.baseSalaryTiered = p.base_salary_tiered !== 0;
 
-      /* calc_flags */
       if (p.calc_flags != null) {
         if (typeof p.calc_flags === 'string') {
           try {
@@ -172,6 +215,9 @@ router.get('/compensation/plan', async (req, res) => {
     plan.importedFrom = plan.imported_from;
     plan.importedAt = plan.imported_at;
 
+    /* ⭐ 兜底：没有运营主管就动态补一个（不写库） */
+    ensureOpsManager(plan.positions);
+
     res.json({ errorcode: 0, data: plan });
   } catch (e) {
     console.error(e);
@@ -188,6 +234,14 @@ router.post('/compensation/plan', async (req, res) => {
     const { storeId, month, periodLabel, positions } = req.body;
     if (!storeId || !month || !Array.isArray(positions)) {
       return res.status(400).json({ errorcode: 400, errormsg: 'storeId/month/positions required' });
+    }
+
+    const ok = await requirePlanEdit(req, storeId);
+    if (!ok) {
+      conn.release();
+      return res
+        .status(403)
+        .json({ errorcode: 403, errormsg: '无权限：设置方案' });
     }
 
     await conn.beginTransaction();
@@ -210,11 +264,15 @@ router.post('/compensation/plan', async (req, res) => {
     const planId = r.insertId;
 
     for (const p of positions) {
+      /* 跳过虚拟的运营主管（id 以 virtual_ 开头） */
+      if (String(p.id || '').startsWith('virtual_')) continue;
+
       const [pr] = await conn.query(
         `INSERT INTO position_config
           (plan_id, title, category, headcount, performance_target, performance_source,
-           total_base_salary, extra_note, class_commission_mode, old_class_fee, calc_flags, disabled)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+           total_base_salary, extra_note, class_commission_mode, old_class_fee, calc_flags, disabled,
+           manager_aggregate_by_dept, commission_tiered, base_salary_tiered)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         [
           planId,
           toStrOr(p.title, '未命名职位'),
@@ -227,7 +285,10 @@ router.post('/compensation/plan', async (req, res) => {
           toStr(p.classCommissionMode),
           toNum(p.oldClassFee),
           toJson(p.calcFlags),
-          toBit(p.disabled),      // ⭐ disabled
+          toBit(p.disabled),
+          toBit(p.managerAggregateByDept),
+          p.commissionTiered === false ? 0 : 1,
+          p.baseSalaryTiered === false ? 0 : 1,
         ]
       );
       const posId = pr.insertId;
@@ -312,6 +373,12 @@ router.delete('/compensation/plan', async (req, res) => {
     if (!store_id || !month) {
       return res.status(400).json({ errorcode: 400, errormsg: 'store_id & month required' });
     }
+
+    const ok = await requirePlanEdit(req, store_id);
+    if (!ok) {
+      return res.status(403).json({ errorcode: 403, errormsg: '无权限：设置方案' });
+    }
+
     const [plans] = await pool.query(
       `SELECT id FROM monthly_compensation_plan WHERE store_id = ? AND month = ?`,
       [store_id, month]
@@ -343,6 +410,12 @@ router.post('/compensation/plan/copy', async (req, res) => {
     }
     if (fromMonth === toMonth) {
       return res.status(400).json({ errorcode: 400, errormsg: 'fromMonth 不能等于 toMonth' });
+    }
+
+    const ok = await requirePlanEdit(req, storeId);
+    if (!ok) {
+      conn.release();
+      return res.status(403).json({ errorcode: 403, errormsg: '无权限：设置方案' });
     }
 
     const [src] = await conn.query(
@@ -382,8 +455,9 @@ router.post('/compensation/plan/copy', async (req, res) => {
       const [newPos] = await conn.query(
         `INSERT INTO position_config
           (plan_id, title, category, headcount, performance_target, performance_source,
-           total_base_salary, extra_note, class_commission_mode, old_class_fee, calc_flags, disabled)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+           total_base_salary, extra_note, class_commission_mode, old_class_fee, calc_flags, disabled,
+           manager_aggregate_by_dept, commission_tiered, base_salary_tiered)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         [
           newPlanId,
           toStrOr(p.title, '未命名职位'),
@@ -396,7 +470,10 @@ router.post('/compensation/plan/copy', async (req, res) => {
           toStr(p.class_commission_mode),
           toNum(p.old_class_fee),
           toJson(p.calc_flags),
-          toBit(p.disabled),      // ⭐ disabled
+          toBit(p.disabled),
+          toBit(p.manager_aggregate_by_dept),
+          p.commission_tiered === 0 ? 0 : 1,
+          p.base_salary_tiered === 0 ? 0 : 1,
         ]
       );
       const newPosId = newPos.insertId;
@@ -488,6 +565,13 @@ router.post('/compensation/init', async (req, res) => {
     if (!storeId) {
       return res.status(400).json({ errorcode: 400, errormsg: 'storeId required' });
     }
+
+    const ok = await requirePlanEdit(req, storeId);
+    if (!ok) {
+      conn.release();
+      return res.status(403).json({ errorcode: 403, errormsg: '无权限：设置方案' });
+    }
+
     const [existing] = await conn.query(
       `SELECT COUNT(*) AS c FROM monthly_compensation_plan WHERE store_id = ?`,
       [storeId]
@@ -585,6 +669,17 @@ router.post('/simulation/setting', async (req, res) => {
     if (!storeId || !month || !input) {
       return res.status(400).json({ errorcode: 400, errormsg: 'storeId/month/input required' });
     }
+
+    const user = tryAuth(req);
+    if (user) {
+      const ok = await userHasPermission(user.uid, 'simulation:access', storeId);
+      if (!ok) {
+        return res
+          .status(403)
+          .json({ errorcode: 403, errormsg: '无权限：测算' });
+      }
+    }
+
     const {
       propertyFee = 0,
       electricityFee = 0,
@@ -632,6 +727,16 @@ router.post('/simulation/setting/copy', async (req, res) => {
     const { storeId, fromMonth, toMonth } = req.body;
     if (!storeId || !fromMonth || !toMonth) {
       return res.status(400).json({ errorcode: 400, errormsg: 'storeId/fromMonth/toMonth required' });
+    }
+
+    const user = tryAuth(req);
+    if (user) {
+      const ok = await userHasPermission(user.uid, 'simulation:access', storeId);
+      if (!ok) {
+        return res
+          .status(403)
+          .json({ errorcode: 403, errormsg: '无权限：测算' });
+      }
     }
 
     const [src] = await pool.query(

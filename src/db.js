@@ -83,6 +83,9 @@ async function ensureTables() {
       old_class_fee         DECIMAL(10,2),
       calc_flags            JSON,
       disabled              TINYINT(1)   NOT NULL DEFAULT 0,
+      manager_aggregate_by_dept TINYINT(1) NOT NULL DEFAULT 0,
+      commission_tiered     TINYINT(1)   NOT NULL DEFAULT 1,
+      base_salary_tiered    TINYINT(1)   NOT NULL DEFAULT 1,
       FOREIGN KEY (plan_id) REFERENCES monthly_compensation_plan(id) ON DELETE CASCADE
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`,
 
@@ -156,6 +159,19 @@ async function ensureTables() {
       updated_at      DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
       UNIQUE KEY uk_store_month (store_id, month)
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`,
+
+    /* 用户权限 */
+    `CREATE TABLE IF NOT EXISTS user_permission (
+      id          BIGINT PRIMARY KEY AUTO_INCREMENT,
+      user_id     BIGINT       NOT NULL,
+      permission  VARCHAR(64)  NOT NULL,
+      store_ids   JSON         NOT NULL,
+      granted_by  BIGINT,
+      granted_at  DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      UNIQUE KEY uk_user_permission (user_id, permission),
+      FOREIGN KEY (user_id)    REFERENCES admin_user(id) ON DELETE CASCADE,
+      FOREIGN KEY (granted_by) REFERENCES admin_user(id) ON DELETE SET NULL
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`,
   ];
 
   for (const sql of sqls) {
@@ -165,6 +181,21 @@ async function ensureTables() {
   /* ⭐ 兼容旧表：如果某些列不存在，自动加 */
   await ensureColumn('position_config', 'disabled', `TINYINT(1) NOT NULL DEFAULT 0`);
   await ensureColumn('admin_user', 'role', `VARCHAR(16) NOT NULL DEFAULT 'user'`);
+  await ensureColumn(
+    'position_config',
+    'manager_aggregate_by_dept',
+    `TINYINT(1) NOT NULL DEFAULT 0`
+  );
+  await ensureColumn(
+    'position_config',
+    'commission_tiered',
+    `TINYINT(1) NOT NULL DEFAULT 1`
+  );
+  await ensureColumn(
+    'position_config',
+    'base_salary_tiered',
+    `TINYINT(1) NOT NULL DEFAULT 1`
+  );
 
   console.log('[db] tables ready');
 }

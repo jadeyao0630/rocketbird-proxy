@@ -13,7 +13,8 @@ const coachRoutes = require('./routes/coach');
 const marketersRoutes = require('./routes/marketers');
 const compensationRoutes = require('./routes/compensation');
 const adminAuthRoutes = require('./routes/adminAuth');
-const cardRoutes = require('./routes/card');               // ⭐ 新增
+const cardRoutes = require('./routes/card');
+const adminPermissionsRoutes = require('./routes/adminPermissions'); // ⭐ 新增
 
 const app = express();
 
@@ -47,7 +48,8 @@ app.use('/api', coachRoutes);
 app.use('/api', marketersRoutes);
 app.use('/api', compensationRoutes);
 app.use('/api', adminAuthRoutes);
-app.use('/api', cardRoutes);                                // ⭐ 新增
+app.use('/api', cardRoutes);
+app.use('/api', adminPermissionsRoutes); // ⭐ 新增
 
 /* 健康检查 */
 app.get('/health', (req, res) => {
