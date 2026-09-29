@@ -7,7 +7,6 @@ const { userHasPermission } = require('./adminPermissions');
 const JWT_SECRET =
   process.env.JWT_SECRET || 'change_this_secret_in_production';
 
-/* 软解析 token */
 function tryAuth(req) {
   const auth = req.headers.authorization || '';
   const token = auth.startsWith('Bearer ') ? auth.slice(7) : '';
@@ -26,7 +25,7 @@ async function requirePlanEdit(req, storeId) {
 }
 
 /* ============================================================
- * 工具：字段类型兜底
+ * 工具
  * ============================================================ */
 function toJson(v) {
   if (v == null || v === '') return null;
@@ -68,7 +67,7 @@ function toBit(v) {
 }
 
 /* ============================================================
- * ⭐ 兜底：没有运营主管时动态补一个
+ * 兜底：没有运营主管时动态补一个
  * ============================================================ */
 function ensureOpsManager(positions) {
   if (!Array.isArray(positions)) return positions;
@@ -83,10 +82,21 @@ function ensureOpsManager(positions) {
     performanceSource: 'self',
     totalBaseSalary: 0,
     commissionTiers: [
-      { id: 'virtual_ops_tier_0', threshold: 0, rate: 0.03, note: '店长销售 × 3%' },
+      {
+        id: 'virtual_ops_tier_0',
+        threshold: 0,
+        rate: 0.03,
+        salesMode: 'percent',
+        note: '店长销售 × 3%',
+      },
     ],
     baseSalaryTiers: [
-      { id: 'virtual_ops_base_0', threshold: 0, amount: 20000, note: '固定底薪' },
+      {
+        id: 'virtual_ops_base_0',
+        threshold: 0,
+        amount: 20000,
+        note: '固定底薪',
+      },
     ],
     extraNote: '佣金 = 店长销售 × 3%',
   });
@@ -94,7 +104,7 @@ function ensureOpsManager(positions) {
 }
 
 /* ============================================================
- * 列表：某门店所有方案
+ * 列表
  * ============================================================ */
 router.get('/compensation/plans', async (req, res) => {
   try {
@@ -152,6 +162,7 @@ router.get('/compensation/plan', async (req, res) => {
         rate: Number(x.rate),
         classRate: x.class_rate != null ? Number(x.class_rate) : undefined,
         classMode: x.class_mode || undefined,
+        salesMode: x.sales_mode || undefined,
         note: x.note || undefined,
       }));
       p.baseSalaryTiers = bt.map((x) => ({
@@ -190,8 +201,6 @@ router.get('/compensation/plan', async (req, res) => {
 
       p.disabled = !!p.disabled;
       p.managerAggregateByDept = !!p.manager_aggregate_by_dept;
-      p.commissionTiered = p.commission_tiered !== 0;
-      p.baseSalaryTiered = p.base_salary_tiered !== 0;
 
       if (p.calc_flags != null) {
         if (typeof p.calc_flags === 'string') {
@@ -215,7 +224,6 @@ router.get('/compensation/plan', async (req, res) => {
     plan.importedFrom = plan.imported_from;
     plan.importedAt = plan.imported_at;
 
-    /* ⭐ 兜底：没有运营主管就动态补一个（不写库） */
     ensureOpsManager(plan.positions);
 
     res.json({ errorcode: 0, data: plan });
@@ -226,7 +234,7 @@ router.get('/compensation/plan', async (req, res) => {
 });
 
 /* ============================================================
- * 保存（新增或覆盖）
+ * 保存
  * ============================================================ */
 router.post('/compensation/plan', async (req, res) => {
   const conn = await pool.getConnection();
@@ -264,15 +272,14 @@ router.post('/compensation/plan', async (req, res) => {
     const planId = r.insertId;
 
     for (const p of positions) {
-      /* 跳过虚拟的运营主管（id 以 virtual_ 开头） */
       if (String(p.id || '').startsWith('virtual_')) continue;
 
       const [pr] = await conn.query(
         `INSERT INTO position_config
           (plan_id, title, category, headcount, performance_target, performance_source,
            total_base_salary, extra_note, class_commission_mode, old_class_fee, calc_flags, disabled,
-           manager_aggregate_by_dept, commission_tiered, base_salary_tiered)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+           manager_aggregate_by_dept)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         [
           planId,
           toStrOr(p.title, '未命名职位'),
@@ -287,22 +294,22 @@ router.post('/compensation/plan', async (req, res) => {
           toJson(p.calcFlags),
           toBit(p.disabled),
           toBit(p.managerAggregateByDept),
-          p.commissionTiered === false ? 0 : 1,
-          p.baseSalaryTiered === false ? 0 : 1,
         ]
       );
       const posId = pr.insertId;
 
       for (const t of p.commissionTiers || []) {
         await conn.query(
-          `INSERT INTO commission_tier (position_id, threshold, rate, class_rate, class_mode, note)
-           VALUES (?, ?, ?, ?, ?, ?)`,
+          `INSERT INTO commission_tier
+            (position_id, threshold, rate, class_rate, class_mode, sales_mode, note)
+           VALUES (?, ?, ?, ?, ?, ?, ?)`,
           [
             posId,
             toNumOrZero(t.threshold),
             toNumOrZero(t.rate),
             toNum(t.classRate),
             toStr(t.classMode),
+            toStr(t.salesMode),
             toStr(t.note),
           ]
         );
@@ -456,8 +463,8 @@ router.post('/compensation/plan/copy', async (req, res) => {
         `INSERT INTO position_config
           (plan_id, title, category, headcount, performance_target, performance_source,
            total_base_salary, extra_note, class_commission_mode, old_class_fee, calc_flags, disabled,
-           manager_aggregate_by_dept, commission_tiered, base_salary_tiered)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+           manager_aggregate_by_dept)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         [
           newPlanId,
           toStrOr(p.title, '未命名职位'),
@@ -472,8 +479,6 @@ router.post('/compensation/plan/copy', async (req, res) => {
           toJson(p.calc_flags),
           toBit(p.disabled),
           toBit(p.manager_aggregate_by_dept),
-          p.commission_tiered === 0 ? 0 : 1,
-          p.base_salary_tiered === 0 ? 0 : 1,
         ]
       );
       const newPosId = newPos.insertId;
@@ -481,14 +486,16 @@ router.post('/compensation/plan/copy', async (req, res) => {
       const [ct] = await conn.query(`SELECT * FROM commission_tier WHERE position_id = ?`, [p.id]);
       for (const t of ct) {
         await conn.query(
-          `INSERT INTO commission_tier (position_id, threshold, rate, class_rate, class_mode, note)
-           VALUES (?, ?, ?, ?, ?, ?)`,
+          `INSERT INTO commission_tier
+            (position_id, threshold, rate, class_rate, class_mode, sales_mode, note)
+           VALUES (?, ?, ?, ?, ?, ?, ?)`,
           [
             newPosId,
             toNumOrZero(t.threshold),
             toNumOrZero(t.rate),
             toNum(t.class_rate),
             toStr(t.class_mode),
+            toStr(t.sales_mode),
             toStr(t.note),
           ]
         );

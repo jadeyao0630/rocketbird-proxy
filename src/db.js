@@ -2,9 +2,6 @@ require('dotenv').config();
 const mysql = require('mysql2/promise');
 const bcrypt = require('bcrypt');
 
-/* ============================================================
- * 1) 先连 MySQL（不指定 database），用于 CREATE DATABASE
- * ============================================================ */
 async function ensureDatabase() {
   const conn = await mysql.createConnection({
     host: process.env.DB_HOST || '127.0.0.1',
@@ -21,9 +18,6 @@ async function ensureDatabase() {
   console.log(`[db] database ready: ${dbName}`);
 }
 
-/* ============================================================
- * 2) 连接池
- * ============================================================ */
 const pool = mysql.createPool({
   host: process.env.DB_HOST || '127.0.0.1',
   port: Number(process.env.DB_PORT) || 3306,
@@ -37,12 +31,8 @@ const pool = mysql.createPool({
   timezone: '+08:00',
 });
 
-/* ============================================================
- * 3) 建表
- * ============================================================ */
 async function ensureTables() {
   const sqls = [
-    /* 管理员账号 */
     `CREATE TABLE IF NOT EXISTS admin_user (
       id            BIGINT PRIMARY KEY AUTO_INCREMENT,
       username      VARCHAR(64)  NOT NULL UNIQUE,
@@ -53,7 +43,6 @@ async function ensureTables() {
       updated_at    DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`,
 
-    /* 每月薪酬方案 */
     `CREATE TABLE IF NOT EXISTS monthly_compensation_plan (
       id            BIGINT PRIMARY KEY AUTO_INCREMENT,
       store_id      VARCHAR(64)  NOT NULL,
@@ -68,7 +57,6 @@ async function ensureTables() {
       UNIQUE KEY uk_store_month (store_id, month)
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`,
 
-    /* 岗位配置 */
     `CREATE TABLE IF NOT EXISTS position_config (
       id                    BIGINT PRIMARY KEY AUTO_INCREMENT,
       plan_id               BIGINT       NOT NULL,
@@ -89,19 +77,18 @@ async function ensureTables() {
       FOREIGN KEY (plan_id) REFERENCES monthly_compensation_plan(id) ON DELETE CASCADE
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`,
 
-    /* 佣金阶梯 */
     `CREATE TABLE IF NOT EXISTS commission_tier (
       id          BIGINT PRIMARY KEY AUTO_INCREMENT,
       position_id BIGINT NOT NULL,
       threshold   DECIMAL(12,2) NOT NULL,
-      rate        DECIMAL(8,4)  NOT NULL,
+      rate        DECIMAL(12,4) NOT NULL,
       class_rate  DECIMAL(8,4),
       class_mode  VARCHAR(16),
+      sales_mode  VARCHAR(16),
       note        VARCHAR(255),
       FOREIGN KEY (position_id) REFERENCES position_config(id) ON DELETE CASCADE
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`,
 
-    /* 底薪阶梯 */
     `CREATE TABLE IF NOT EXISTS base_salary_tier (
       id          BIGINT PRIMARY KEY AUTO_INCREMENT,
       position_id BIGINT NOT NULL,
@@ -111,7 +98,6 @@ async function ensureTables() {
       FOREIGN KEY (position_id) REFERENCES position_config(id) ON DELETE CASCADE
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`,
 
-    /* 性别底薪阶梯 */
     `CREATE TABLE IF NOT EXISTS gender_salary_tier (
       id          BIGINT PRIMARY KEY AUTO_INCREMENT,
       position_id BIGINT NOT NULL,
@@ -124,7 +110,6 @@ async function ensureTables() {
       FOREIGN KEY (position_id) REFERENCES position_config(id) ON DELETE CASCADE
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`,
 
-    /* 课程提成 */
     `CREATE TABLE IF NOT EXISTS course_commission (
       id          BIGINT PRIMARY KEY AUTO_INCREMENT,
       position_id BIGINT NOT NULL,
@@ -135,7 +120,6 @@ async function ensureTables() {
       FOREIGN KEY (position_id) REFERENCES position_config(id) ON DELETE CASCADE
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`,
 
-    /* 老课费用阶梯 */
     `CREATE TABLE IF NOT EXISTS old_class_fee_tier (
       id          BIGINT PRIMARY KEY AUTO_INCREMENT,
       position_id BIGINT NOT NULL,
@@ -145,7 +129,6 @@ async function ensureTables() {
       FOREIGN KEY (position_id) REFERENCES position_config(id) ON DELETE CASCADE
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`,
 
-    /* 测算设置 */
     `CREATE TABLE IF NOT EXISTS simulation_setting (
       id              BIGINT PRIMARY KEY AUTO_INCREMENT,
       store_id        VARCHAR(64)  NOT NULL,
@@ -160,7 +143,6 @@ async function ensureTables() {
       UNIQUE KEY uk_store_month (store_id, month)
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`,
 
-    /* 用户权限 */
     `CREATE TABLE IF NOT EXISTS user_permission (
       id          BIGINT PRIMARY KEY AUTO_INCREMENT,
       user_id     BIGINT       NOT NULL,
@@ -178,7 +160,7 @@ async function ensureTables() {
     await pool.query(sql);
   }
 
-  /* ⭐ 兼容旧表：如果某些列不存在，自动加 */
+  /* 兼容旧表 */
   await ensureColumn('position_config', 'disabled', `TINYINT(1) NOT NULL DEFAULT 0`);
   await ensureColumn('admin_user', 'role', `VARCHAR(16) NOT NULL DEFAULT 'user'`);
   await ensureColumn(
@@ -186,23 +168,19 @@ async function ensureTables() {
     'manager_aggregate_by_dept',
     `TINYINT(1) NOT NULL DEFAULT 0`
   );
-  await ensureColumn(
-    'position_config',
-    'commission_tiered',
-    `TINYINT(1) NOT NULL DEFAULT 1`
-  );
-  await ensureColumn(
-    'position_config',
-    'base_salary_tiered',
-    `TINYINT(1) NOT NULL DEFAULT 1`
-  );
+  await ensureColumn('commission_tier', 'sales_mode', `VARCHAR(16)`);
+  /* rate 扩容 */
+  try {
+    await pool.query(
+      `ALTER TABLE commission_tier MODIFY COLUMN rate DECIMAL(12,4) NOT NULL`
+    );
+  } catch (e) {
+    // 忽略
+  }
 
   console.log('[db] tables ready');
 }
 
-/* ============================================================
- * ⭐ 工具：如果列不存在则 ALTER TABLE 加列
- * ============================================================ */
 async function ensureColumn(table, column, definition) {
   const dbName = process.env.DB_NAME || 'gym_payroll';
   const [cols] = await pool.query(
@@ -216,9 +194,6 @@ async function ensureColumn(table, column, definition) {
   }
 }
 
-/* ============================================================
- * 4) 默认超管
- * ============================================================ */
 async function seedAdmin() {
   const [rows] = await pool.query(`SELECT COUNT(*) AS c FROM admin_user`);
   if (rows[0].c > 0) {
@@ -243,9 +218,6 @@ async function seedAdmin() {
   );
 }
 
-/* ============================================================
- * 5) 一键初始化
- * ============================================================ */
 async function initDatabase() {
   await ensureDatabase();
   await ensureTables();
