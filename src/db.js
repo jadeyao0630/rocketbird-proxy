@@ -180,7 +180,7 @@ async function ensureTables() {
     await pool.query(sql);
   }
 
-  /* ⭐ 兼容旧表：如果某些列不存在，自动加 */
+    /* ⭐ 兼容旧表：如果某些列不存在，自动加 */
   await ensureColumn('position_config', 'disabled', `TINYINT(1) NOT NULL DEFAULT 0`);
   await ensureColumn('admin_user', 'role', `VARCHAR(16) NOT NULL DEFAULT 'user'`);
   await ensureColumn(
@@ -193,16 +193,16 @@ async function ensureTables() {
     'manager_include_self',
     `TINYINT(1) NOT NULL DEFAULT 0`
   );
-  await ensureColumn('commission_tier', 'sales_mode', `VARCHAR(16)`);
-
-  /* rate 扩容 */
-  try {
-    await pool.query(
-      `ALTER TABLE commission_tier MODIFY COLUMN rate DECIMAL(12,4) NOT NULL`
-    );
-  } catch (e) {
-    // 忽略（可能已经改过或权限不够）
-  }
+  await ensureColumn(
+    'position_config',
+    'commission_tiered',
+    `TINYINT(1) NOT NULL DEFAULT 1`
+  );
+  await ensureColumn(
+    'position_config',
+    'base_salary_tiered',
+    `TINYINT(1) NOT NULL DEFAULT 1`
+  );
 
   console.log('[db] tables ready');
 }
