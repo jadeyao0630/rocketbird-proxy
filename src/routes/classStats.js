@@ -4,10 +4,6 @@ const { UPSTREAM } = require('../config');
 
 const router = express.Router();
 
-/**
- * 通用 Excel 代理
- * @param {string} upstreamUrl 上游地址
- */
 function makeExcelProxy(upstreamUrl) {
   return async (req, res, next) => {
     try {
@@ -33,7 +29,6 @@ function makeExcelProxy(upstreamUrl) {
   };
 }
 
-/* ---------- Excel 导出（原样保留） ---------- */
 router.post(
   '/swimming_class_statistics_excel',
   makeExcelProxy(UPSTREAM.swimmingClassExcel)
@@ -43,13 +38,6 @@ router.post(
   makeExcelProxy(UPSTREAM.coachClassExcel)
 );
 
-/* ---------- 统计接口（返回 JSON） ---------- */
-
-/**
- * 通用 JSON 代理
- * @param {string} upstreamUrl
- * @param {Object} [extraParams] 额外固定参数（会覆盖同名的 req.body 字段）
- */
 function makeJsonProxy(upstreamUrl, extraParams) {
   return async (req, res, next) => {
     try {
@@ -58,7 +46,6 @@ function makeJsonProxy(upstreamUrl, extraParams) {
         if (v !== undefined && v !== null) params.append(k, String(v));
       });
 
-      /* ⭐ 追加固定参数（覆盖同名） */
       if (extraParams) {
         Object.entries(extraParams).forEach(([k, v]) => {
           if (v !== undefined && v !== null) {
@@ -79,10 +66,7 @@ function makeJsonProxy(upstreamUrl, extraParams) {
 }
 
 /* 售卡售课业绩 */
-router.post(
-  '/membership_statistics',
-  makeJsonProxy(UPSTREAM.membership)
-);
+router.post('/membership_statistics', makeJsonProxy(UPSTREAM.membership));
 router.post(
   '/swimmingCoach_statistics',
   makeJsonProxy(UPSTREAM.swimmingCoach)
@@ -97,10 +81,15 @@ router.post(
   '/swimming_class_statistics',
   makeJsonProxy(UPSTREAM.swimmingClass)
 );
-/* ⭐ 私教消课：额外带 type=2 */
 router.post(
   '/coach_class_statistic',
   makeJsonProxy(UPSTREAM.coachClass, { type: 2 })
+);
+
+/* ⭐ 业务流水：POST，参数走 body */
+router.post(
+  '/card-order-list',
+  makeJsonProxy(UPSTREAM.cardOrderList)
 );
 
 module.exports = router;

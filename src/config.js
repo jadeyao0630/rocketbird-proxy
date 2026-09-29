@@ -26,6 +26,7 @@ module.exports = {
     membership: `${TARGET}/Web/Statistics/membership_statistics`,
     swimmingCoach: `${TARGET}/Web/Statistics/swimming_coach_statistics`,
     privateCoach: `${TARGET}/Web/Statistics/private_coach_statistics`,
+    cardOrderList: `${TARGET}/Web/Statistics/getFinancialFlowNew`,
 
     /* 消课 */
     swimmingClass: `${TARGET}/Web/Class/swimming_class_statistics`,
