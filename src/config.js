@@ -29,7 +29,7 @@ module.exports = {
 
     /* 消课 */
     swimmingClass: `${TARGET}/Web/Class/swimming_class_statistics`,
-    coachClass: `${TARGET}/Web/Statistics/coach_class_statistics`,
+    coachClass: `${TARGET}/Web/Class/new_class_statistics`,
 
     /* Excel */
     swimmingClassExcel: `${TARGET}/Web/Class/swimming_class_statistics_excel`,

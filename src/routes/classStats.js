@@ -48,14 +48,24 @@ router.post(
 /**
  * 通用 JSON 代理
  * @param {string} upstreamUrl
+ * @param {Object} [extraParams] 额外固定参数（会覆盖同名的 req.body 字段）
  */
-function makeJsonProxy(upstreamUrl) {
+function makeJsonProxy(upstreamUrl, extraParams) {
   return async (req, res, next) => {
     try {
       const params = new URLSearchParams();
       Object.entries(req.body || {}).forEach(([k, v]) => {
         if (v !== undefined && v !== null) params.append(k, String(v));
       });
+
+      /* ⭐ 追加固定参数（覆盖同名） */
+      if (extraParams) {
+        Object.entries(extraParams).forEach(([k, v]) => {
+          if (v !== undefined && v !== null) {
+            params.set(k, String(v));
+          }
+        });
+      }
 
       const response = await http.post(upstreamUrl, params, {
         headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
@@ -87,9 +97,10 @@ router.post(
   '/swimming_class_statistics',
   makeJsonProxy(UPSTREAM.swimmingClass)
 );
+/* ⭐ 私教消课：额外带 type=2 */
 router.post(
   '/coach_class_statistic',
-  makeJsonProxy(UPSTREAM.coachClass)
+  makeJsonProxy(UPSTREAM.coachClass, { type: 2 })
 );
 
 module.exports = router;

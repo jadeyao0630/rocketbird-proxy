@@ -201,6 +201,7 @@ router.get('/compensation/plan', async (req, res) => {
 
       p.disabled = !!p.disabled;
       p.managerAggregateByDept = !!p.manager_aggregate_by_dept;
+      p.managerIncludeSelf = !!p.manager_include_self;
 
       if (p.calc_flags != null) {
         if (typeof p.calc_flags === 'string') {
@@ -278,8 +279,8 @@ router.post('/compensation/plan', async (req, res) => {
         `INSERT INTO position_config
           (plan_id, title, category, headcount, performance_target, performance_source,
            total_base_salary, extra_note, class_commission_mode, old_class_fee, calc_flags, disabled,
-           manager_aggregate_by_dept)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+           manager_aggregate_by_dept, manager_include_self)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         [
           planId,
           toStrOr(p.title, '未命名职位'),
@@ -294,6 +295,7 @@ router.post('/compensation/plan', async (req, res) => {
           toJson(p.calcFlags),
           toBit(p.disabled),
           toBit(p.managerAggregateByDept),
+          toBit(p.managerIncludeSelf),
         ]
       );
       const posId = pr.insertId;
@@ -463,8 +465,8 @@ router.post('/compensation/plan/copy', async (req, res) => {
         `INSERT INTO position_config
           (plan_id, title, category, headcount, performance_target, performance_source,
            total_base_salary, extra_note, class_commission_mode, old_class_fee, calc_flags, disabled,
-           manager_aggregate_by_dept)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+           manager_aggregate_by_dept, manager_include_self)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         [
           newPlanId,
           toStrOr(p.title, '未命名职位'),
@@ -479,6 +481,7 @@ router.post('/compensation/plan/copy', async (req, res) => {
           toJson(p.calc_flags),
           toBit(p.disabled),
           toBit(p.manager_aggregate_by_dept),
+          toBit(p.manager_include_self),
         ]
       );
       const newPosId = newPos.insertId;
