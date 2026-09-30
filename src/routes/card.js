@@ -13,6 +13,7 @@ const UA =
  *        跨子域 Cookie 需手动传递。
  * ============================================================ */
 async function extractCookieHeader() {
+  /* 收集多个域名的 Cookie，合并 */
   const domains = [
     'https://vip.rocketbird.cn',
     'https://wx.rocketbird.cn',
@@ -27,6 +28,7 @@ async function extractCookieHeader() {
     } catch {}
   }
 
+  /* 兜底：全局 getCookies（不指定域名），拿到所有 jar 里的 */
   try {
     const all = await cookieJar.getCookies('https://wx.rocketbird.cn');
     all.forEach((c) => map.set(c.key, c.value));
@@ -37,7 +39,7 @@ async function extractCookieHeader() {
     .join('; ');
 
   console.log(
-    '[card] 提取 Cookie:',
+    '[card/list] 提取 Cookie:',
     Array.from(map.keys()).join(', ') || '(空)'
   );
   return header;
@@ -54,8 +56,9 @@ async function loginUpstream(username, password) {
     throw new Error('UPSTREAM.login 未配置');
   }
 
-  console.log('[card] 登录上游，账号:', username);
+  console.log('[card/list] 登录上游，账号:', username);
 
+  /* ⭐ 用 x-www-form-urlencoded 格式登录 */
   const params = new URLSearchParams();
   params.append('username', username);
   params.append('password', password);
@@ -70,7 +73,7 @@ async function loginUpstream(username, password) {
   });
 
   console.log(
-    '[card] 登录返回:',
+    '[card/list] 登录返回:',
     resp.data?.errorcode,
     resp.data?.errormsg,
     'status:',
@@ -100,17 +103,17 @@ async function cutoverUpstream(busId, cookieHeader) {
   };
   if (cookieHeader) headers.Cookie = cookieHeader;
 
-  console.log('[card] 切换场馆 bus_id =', busId);
+  console.log('[card/list] 切换场馆 bus_id =', busId);
   try {
     const resp = await http.post(UPSTREAM.cutover, params, { headers });
     console.log(
-      '[card] cutover 返回:',
+      '[card/list] cutover 返回:',
       resp.status,
       resp.data?.errorcode,
       resp.data?.errormsg
     );
   } catch (e) {
-    console.warn('[card] cutover 失败:', e.message);
+    console.warn('[card/list] cutover 失败:', e.message);
   }
 }
 
@@ -131,45 +134,15 @@ async function fetchCardsFromUpstream(busId, cardType, cookieHeader) {
     Referer: 'https://vip.rocketbird.cn',
     Origin: 'https://vip.rocketbird.cn',
   };
+  /* ⭐ 核心：显式带上 Cookie（跨子域） */
   if (cookieHeader) headers.Cookie = cookieHeader;
 
-  console.log('[card] 请求上游:', UPSTREAM.cardList, params);
+  console.log('[card/list] 请求上游:', UPSTREAM.cardList, params);
   const resp = await http.get(UPSTREAM.cardList, { params, headers });
   console.log(
-    '[card] 上游返回:',
+    '[card/list] 上游返回:',
     resp.data?.errorcode,
     resp.data?.errormsg
-  );
-  return resp;
-}
-
-/* ============================================================
- * ⭐ 拉销售订单明细（card-order-list）
- * ============================================================ */
-async function fetchCardOrderListFromUpstream(params, cookieHeader) {
-  const headers = {
-    'Content-Type': 'application/x-www-form-urlencoded',
-    'User-Agent': UA,
-    Referer: 'https://vip.rocketbird.cn',
-    Origin: 'https://vip.rocketbird.cn',
-  };
-  if (cookieHeader) headers.Cookie = cookieHeader;
-
-  console.log('[card-order] 请求上游:', UPSTREAM.cardOrderList, params);
-
-  /* ⭐ 注意：上游接口是 POST，参数 x-www-form-urlencoded */
-  const form = new URLSearchParams();
-  Object.entries(params).forEach(([k, v]) => {
-    if (v !== undefined && v !== null) form.append(k, String(v));
-  });
-
-  const resp = await http.post(UPSTREAM.cardOrderList, form, { headers });
-  console.log(
-    '[card-order] 上游返回:',
-    resp.data?.errorcode,
-    resp.data?.errormsg,
-    'count:',
-    resp.data?.data?.count
   );
   return resp;
 }
@@ -193,6 +166,7 @@ router.post('/card/list', async (req, res) => {
         .json({ errorcode: 400, errormsg: '缺少登录凭据' });
     }
 
+    /* 1) 登录 */
     try {
       await loginUpstream(username, password);
     } catch (e) {
@@ -200,12 +174,19 @@ router.post('/card/list', async (req, res) => {
       return res.status(500).json({ errorcode: 500, errormsg: e.message });
     }
 
+    /* 2) 提取 Cookie */
     let cookieHeader = await extractCookieHeader();
+
+    /* 3) 切场馆（可选，若上游要求） */
     await cutoverUpstream(bus_id, cookieHeader);
+
+    /* 4) 重新提取 Cookie（切场馆可能又写了 Cookie） */
     cookieHeader = await extractCookieHeader();
 
+    /* 5) 拉课程 */
     let resp = await fetchCardsFromUpstream(bus_id, card_type, cookieHeader);
 
+    /* 6) 会话失效 → 重登并重试 */
     if (resp.data?.errorcode === 40025 || resp.data?.errorcode === 40026) {
       console.warn('[card/list] 会话失效，重新登录…');
       try {
@@ -214,6 +195,11 @@ router.post('/card/list', async (req, res) => {
         await cutoverUpstream(bus_id, cookieHeader);
         cookieHeader = await extractCookieHeader();
         resp = await fetchCardsFromUpstream(bus_id, card_type, cookieHeader);
+        console.log(
+          '[card/list] 重试后返回:',
+          resp.data?.errorcode,
+          resp.data?.errormsg
+        );
       } catch (e) {
         console.error('[card/list] 重登失败:', e.message);
       }
@@ -222,110 +208,6 @@ router.post('/card/list', async (req, res) => {
     res.json(resp.data);
   } catch (e) {
     console.error('[card/list] 请求失败:', e.message);
-    res.status(500).json({ errorcode: 500, errormsg: e.message });
-  }
-});
-
-/* ============================================================
- * ⭐ POST /api/card-order-list
- * body: { bus_id, sale_id, begin_date, end_date, page_no?, page_size?, username?, password? }
- *
- * 说明：
- *  - 前端调用此接口时，不需要传 username / password
- *  - 后端会用 .env 里的账号自动登录 + 拿 Cookie + 切场馆 + 拉订单
- * ============================================================ */
-router.post('/card-order-list', async (req, res) => {
-  try {
-    const {
-      bus_id,
-      sale_id,
-      begin_date,
-      end_date,
-      page_no = 1,
-      page_size = 1000,
-    } = req.body || {};
-
-    if (!bus_id) {
-      return res
-        .status(400)
-        .json({ errorcode: 400, errormsg: 'bus_id 必填' });
-    }
-    if (!begin_date || !end_date) {
-      return res
-        .status(400)
-        .json({ errorcode: 400, errormsg: 'begin_date & end_date 必填' });
-    }
-
-    /* ⭐ 从环境变量取账号（前端不用传） */
-    const username =
-      req.body?.username ||
-      process.env.VITE_TEST_USERNAME ||
-      process.env.UPSTREAM_USERNAME ||
-      '';
-    const password =
-      req.body?.password ||
-      process.env.VITE_TEST_PASSWORD ||
-      process.env.UPSTREAM_PASSWORD ||
-      '';
-
-    if (!username || !password) {
-      return res.status(500).json({
-        errorcode: 500,
-        errormsg: '后端未配置上游账号（UPSTREAM_USERNAME / UPSTREAM_PASSWORD）',
-      });
-    }
-
-    /* 1) 登录 */
-    try {
-      await loginUpstream(username, password);
-    } catch (e) {
-      console.error('[card-order] 登录失败:', e.message);
-      return res.status(500).json({ errorcode: 500, errormsg: e.message });
-    }
-
-    /* 2) 提取 Cookie */
-    let cookieHeader = await extractCookieHeader();
-
-    /* 3) 切场馆 */
-    await cutoverUpstream(bus_id, cookieHeader);
-
-    /* 4) 重新提取 Cookie（切场馆可能又写了） */
-    cookieHeader = await extractCookieHeader();
-
-    /* 5) 拉订单（sale_id 留空则拉全店） */
-    const params = {
-      bus_id,
-      sale_id: sale_id || '',
-      begin_date,
-      end_date,
-      page_no,
-      page_size,
-    };
-
-    let resp = await fetchCardOrderListFromUpstream(params, cookieHeader);
-
-    /* 6) 会话失效 → 重登并重试 */
-    if (resp.data?.errorcode === 40025 || resp.data?.errorcode === 40026) {
-      console.warn('[card-order] 会话失效，重新登录…');
-      try {
-        await loginUpstream(username, password);
-        cookieHeader = await extractCookieHeader();
-        await cutoverUpstream(bus_id, cookieHeader);
-        cookieHeader = await extractCookieHeader();
-        resp = await fetchCardOrderListFromUpstream(params, cookieHeader);
-        console.log(
-          '[card-order] 重试后返回:',
-          resp.data?.errorcode,
-          resp.data?.errormsg
-        );
-      } catch (e) {
-        console.error('[card-order] 重登失败:', e.message);
-      }
-    }
-
-    res.json(resp.data);
-  } catch (e) {
-    console.error('[card-order] 请求失败:', e.message);
     res.status(500).json({ errorcode: 500, errormsg: e.message });
   }
 });
