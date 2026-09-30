@@ -11,10 +11,10 @@ const VALID_PERMISSIONS = new Set([
   'plan:view',
   'plan:edit',
   'target:edit',
-  'month:add',              // ⭐ 新增
-  'month:delete',           // ⭐ 新增
-  'plan:import',            // ⭐ 新增
-  'plan:export',            // ⭐ 新增
+  'month:add',
+  'month:delete',
+  'plan:import',
+  'plan:export',
   /* 职位细粒度 */
   'position:add',
   'position:delete',
@@ -36,6 +36,7 @@ const VALID_PERMISSIONS = new Set([
   'ops:view',
   'export:payroll',
   'export:personal',
+  'report:marketing:view',      // ⭐ 新增
   /* 综合设置 */
   'user:add',
   'user:resetPwd',
