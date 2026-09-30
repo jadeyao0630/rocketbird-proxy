@@ -174,13 +174,28 @@ async function ensureTables() {
       FOREIGN KEY (user_id)    REFERENCES admin_user(id) ON DELETE CASCADE,
       FOREIGN KEY (granted_by) REFERENCES admin_user(id) ON DELETE SET NULL
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`,
+
+    /* ⭐ 新增：薪酬计算-员工新人/排除状态 */
+    `CREATE TABLE IF NOT EXISTS payroll_staff_status (
+      id          BIGINT PRIMARY KEY AUTO_INCREMENT,
+      bus_id      VARCHAR(64) NOT NULL COMMENT '门店 ID',
+      month       VARCHAR(7)  NOT NULL COMMENT '月份 YYYY-MM',
+      staff_id    VARCHAR(64) NOT NULL COMMENT '员工 ID',
+      staff_name  VARCHAR(64) DEFAULT NULL COMMENT '员工姓名（便于排查）',
+      is_newbie   TINYINT(1)  NOT NULL DEFAULT 0 COMMENT '是否新人',
+      is_excluded TINYINT(1)  NOT NULL DEFAULT 0 COMMENT '是否排除（不计入）',
+      updated_by  VARCHAR(64) DEFAULT NULL COMMENT '操作人',
+      updated_at  DATETIME    NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+      UNIQUE KEY uk_bus_month_staff (bus_id, month, staff_id),
+      KEY idx_bus_month (bus_id, month)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='薪酬计算-员工新人/排除状态'`,
   ];
 
   for (const sql of sqls) {
     await pool.query(sql);
   }
 
-    /* ⭐ 兼容旧表：如果某些列不存在，自动加 */
+  /* ⭐ 兼容旧表：如果某些列不存在，自动加 */
   await ensureColumn('position_config', 'disabled', `TINYINT(1) NOT NULL DEFAULT 0`);
   await ensureColumn('admin_user', 'role', `VARCHAR(16) NOT NULL DEFAULT 'user'`);
   await ensureColumn(
