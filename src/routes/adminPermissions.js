@@ -7,12 +7,20 @@ const JWT_SECRET =
   process.env.JWT_SECRET || 'change_this_secret_in_production';
 
 const VALID_PERMISSIONS = new Set([
+  /* 薪酬佣金设置 */
   'plan:view',
   'plan:edit',
   'target:edit',
-  'payroll:calc',
-  'user:add',
-  'user:resetPwd',
+  'month:add',              // ⭐ 新增
+  'month:delete',           // ⭐ 新增
+  'plan:import',            // ⭐ 新增
+  'plan:export',            // ⭐ 新增
+  /* 职位细粒度 */
+  'position:add',
+  'position:delete',
+  'position:rename',
+  'headcount:edit',
+  /* 薪酬佣金测算 */
   'simulation:access',
   'simulation:cost:property',
   'simulation:cost:electricity',
@@ -23,9 +31,14 @@ const VALID_PERMISSIONS = new Set([
   'simulation:share',
   'simulation:gender',
   'simulation:course',
+  /* 薪酬佣金计算 */
+  'payroll:calc',
   'ops:view',
   'export:payroll',
   'export:personal',
+  /* 综合设置 */
+  'user:add',
+  'user:resetPwd',
 ]);
 
 function authRequired(req, res, next) {
