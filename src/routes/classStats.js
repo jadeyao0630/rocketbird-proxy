@@ -321,4 +321,113 @@ router.post('/card-order-list', async (req, res) => {
   }
 });
 
+/* ============================================================
+ * ⭐ front-money-list：定金/押金列表
+ * 需先登录 + 携带 Cookie
+ * ============================================================ */
+router.post('/front-money-list', async (req, res) => {
+  try {
+    const {
+      bus_id,
+      s_date,
+      e_date,
+      page_no = 1,
+      page_size = 1000,
+      username,
+      password,
+    } = req.body || {};
+
+    if (!bus_id || !s_date || !e_date) {
+      return res
+        .status(400)
+        .json({ errorcode: 400, errormsg: 'bus_id / s_date / e_date 必填' });
+    }
+    if (!username || !password) {
+      return res
+        .status(400)
+        .json({ errorcode: 400, errormsg: '缺少登录凭据（username / password）' });
+    }
+
+    /* 1) 登录 */
+    try {
+      await loginUpstream(username, password);
+    } catch (e) {
+      console.error('[front-money-list] 登录失败:', e.message);
+      return res.status(500).json({ errorcode: 500, errormsg: e.message });
+    }
+
+    /* 2) 提取 Cookie */
+    let cookieHeader = await extractCookieHeader();
+
+    /* 3) 切场馆 */
+    await cutoverUpstream(bus_id, cookieHeader);
+
+    /* 4) 重新提取 Cookie */
+    cookieHeader = await extractCookieHeader();
+
+    /* 5) 构造表单参数 */
+    const buildParams = () => {
+      const params = new URLSearchParams();
+      params.append('bus_id', String(bus_id));
+      params.append('s_date', String(s_date));
+      params.append('e_date', String(e_date));
+      params.append('page_no', String(page_no));
+      params.append('page_size', String(page_size));
+      return params;
+    };
+
+    const buildHeaders = (cookie) => {
+      const headers = {
+        'Content-Type': 'application/x-www-form-urlencoded',
+        'User-Agent': UA,
+        Referer: 'https://vip.rocketbird.cn',
+        Origin: 'https://vip.rocketbird.cn',
+      };
+      if (cookie) headers.Cookie = cookie;
+      return headers;
+    };
+
+    /* 6) 请求上游 */
+    const doFetch = async (cookie) => {
+      console.log('[front-money-list] 请求上游:', UPSTREAM.frontMoneyList, {
+        bus_id,
+        s_date,
+        e_date,
+      });
+      const resp = await http.post(
+        UPSTREAM.frontMoneyList,
+        buildParams(),
+        { headers: buildHeaders(cookie) }
+      );
+      console.log(
+        '[front-money-list] 上游返回:',
+        resp.data?.errorcode,
+        resp.data?.errormsg
+      );
+      return resp;
+    };
+
+    let resp = await doFetch(cookieHeader);
+
+    /* 7) 会话失效 → 重登重试 */
+    if (resp.data?.errorcode === 40025 || resp.data?.errorcode === 40026) {
+      console.warn('[front-money-list] 会话失效，重新登录…');
+      try {
+        await loginUpstream(username, password);
+        cookieHeader = await extractCookieHeader();
+        await cutoverUpstream(bus_id, cookieHeader);
+        cookieHeader = await extractCookieHeader();
+        resp = await doFetch(cookieHeader);
+      } catch (e) {
+        console.error('[front-money-list] 重登失败:', e.message);
+      }
+    }
+
+    res.json(resp.data);
+  } catch (e) {
+    console.error('[front-money-list] 请求失败:', e.message);
+    res.status(500).json({ errorcode: 500, errormsg: e.message });
+  }
+});
+
 module.exports = router;

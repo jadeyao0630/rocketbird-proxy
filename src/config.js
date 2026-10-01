@@ -40,5 +40,6 @@ module.exports = {
      *   card_type: 1=会籍卡 2=私教课 3=泳教课
      */
     cardList: `${TARGET}/Web/Card/get_card_list`,
+    frontMoneyList: `${TARGET}/Web/FrontMoney/front_money_list`,
   },
 };

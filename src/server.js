@@ -15,7 +15,7 @@ const compensationRoutes = require('./routes/compensation');
 const adminAuthRoutes = require('./routes/adminAuth');
 const cardRoutes = require('./routes/card');
 const adminPermissionsRoutes = require('./routes/adminPermissions');
-const payrollStatusRoutes = require('./routes/payrollStatus');   // ⭐ 新增
+const payrollStatusRoutes = require('./routes/payrollStatus');
 
 const app = express();
 
@@ -51,7 +51,7 @@ app.use('/api', compensationRoutes);
 app.use('/api', adminAuthRoutes);
 app.use('/api', cardRoutes);
 app.use('/api', adminPermissionsRoutes);
-app.use('/api', payrollStatusRoutes);   // ⭐ 新增
+app.use('/api', payrollStatusRoutes);
 
 /* 健康检查 */
 app.get('/health', (req, res) => {

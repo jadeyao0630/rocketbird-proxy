@@ -37,6 +37,7 @@ const VALID_PERMISSIONS = new Set([
   'export:payroll',
   'export:personal',
   'report:marketing:view',      // ⭐ 新增
+  'report:monthly:view',        // ⭐ 新增
   /* 综合设置 */
   'user:add',
   'user:resetPwd',
