@@ -1,0 +1,94 @@
+[
+  {
+    "name": "员工借款（备用金）",
+    "processCode": "PROC-4003F0FD-65E5-402D-88D4-10CC9FE990EE"
+  },
+  {
+    "name": "访客登记",
+    "processCode": "PROC-2204B391-DD90-440B-81DD-D5F146D30797"
+  },
+  {
+    "name": "印章、证照、档案 使用申请",
+    "processCode": "PROC-E359FF6E-8A63-4C84-8136-9062A0D99A7D"
+  },
+  {
+    "name": "差旅报销申请",
+    "processCode": "PROC-AC21EDCD-971A-466A-A3D8-F516144A1CB7"
+  },
+  {
+    "name": "员工费用报销",
+    "processCode": "PROC-75EA254D-547E-4453-A6A8-AFE3D3C3893A"
+  },
+  {
+    "name": "付款申请单",
+    "processCode": "PROC-D50151C5-4E22-4F7E-B70F-F3A2F1C26DAB"
+  },
+  {
+    "name": "供应商合同",
+    "processCode": "PROC-F24A8BF2-7E0F-4289-8A31-1CFCD0754087"
+  },
+  {
+    "name": "通知供应商发货单",
+    "processCode": "PROC-340E5F83-AEF1-45F8-9AF5-5DBA60E04A23"
+  },
+  {
+    "name": "采购单",
+    "processCode": "PROC-09334DEC-986F-406F-8483-CBFA5D5CD360"
+  },
+  {
+    "name": "出差申请",
+    "processCode": "PROC-163D4924-AE79-4CD0-86BF-814E38840910"
+  },
+  {
+    "name": "合同用印",
+    "processCode": "PROC-9BF7208D-5564-4803-A2B0-8AF73394E17F"
+  },
+  {
+    "name": "请示",
+    "processCode": "PROC-B23CDEBB-1CD9-480F-AD55-82954746D1BA"
+  },
+  {
+    "name": "客户工单",
+    "processCode": "PROC-B8298274-0DBE-4498-B7E9-738718A15E5E"
+  },
+  {
+    "name": "客户收货确认单",
+    "processCode": "PROC-A29C650D-4D86-47E5-A3AD-048D41A9BE13"
+  },
+  {
+    "name": "客户合同",
+    "processCode": "PROC-A41B1B32-844D-4274-A591-59844EFB3F8F"
+  },
+  {
+    "name": "银行账户（第三方账户） 开立、变更、注销",
+    "processCode": "PROC-415E3191-DDEF-41A4-AF55-E2BC93EE9523"
+  },
+  {
+    "name": "请假单",
+    "processCode": "PROC-27197D2E-4C7B-4092-B435-D2E2D2BA3D85"
+  },
+  {
+    "name": "会员退费",
+    "processCode": "PROC-D6949DBC-FBCE-4D60-9CCE-402D448599F4"
+  },
+  {
+    "name": "资产报废申请表",
+    "processCode": "PROC-68A8A85B-67AE-48AA-B9BF-65B8A3BAFE10"
+  },
+  {
+    "name": "资产调拨申请表",
+    "processCode": "PROC-D3132C5B-5059-4116-AC2A-CB8D3B516575"
+  },
+  {
+    "name": "会签单",
+    "processCode": "PROC-29AACFCA-462F-4E7C-AC97-95A82CCB290A"
+  },
+  {
+    "name": "资产购置申请表",
+    "processCode": "PROC-22E5940E-4BF9-4A1C-9A41-F5BAC0670C01"
+  },
+  {
+    "name": "轻量审批-权限申请",
+    "processCode": "PROC-D17C8636-7B5D-4C8A-961B-9D8271DB7B1A"
+  }
+]

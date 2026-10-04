@@ -16,6 +16,7 @@ const adminAuthRoutes = require('./routes/adminAuth');
 const cardRoutes = require('./routes/card');
 const adminPermissionsRoutes = require('./routes/adminPermissions');
 const payrollStatusRoutes = require('./routes/payrollStatus');
+const dingtalkRoutes = require('./routes/dingtalk');          // ⭐ 新增
 
 const app = express();
 
@@ -52,6 +53,7 @@ app.use('/api', adminAuthRoutes);
 app.use('/api', cardRoutes);
 app.use('/api', adminPermissionsRoutes);
 app.use('/api', payrollStatusRoutes);
+app.use('/api', dingtalkRoutes);                              // ⭐ 新增
 
 /* 健康检查 */
 app.get('/health', (req, res) => {
