@@ -41,6 +41,7 @@ const DEFAULT_TEMPLATES = [
   { name: '资产调拨申请表', processCode: 'PROC-D3132C5B-5059-4116-AC2A-CB8D3B516575' },
   { name: '会签单', processCode: 'PROC-29AACFCA-462F-4E7C-AC97-95A82CCB290A' },
   { name: '资产购置申请表', processCode: 'PROC-22E5940E-4BF9-4A1C-9A41-F5BAC0670C01' },
+  { name: '底薪、佣金支付申请', processCode: 'PROC-12FDF8E9-3183-4908-9962-9E61E1081EEB' },
   { name: '轻量审批-权限申请', processCode: 'PROC-D17C8636-7B5D-4C8A-961B-9D8271DB7B1A' },
 ];
 
