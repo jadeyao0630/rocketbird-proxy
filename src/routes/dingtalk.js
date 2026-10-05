@@ -18,7 +18,6 @@ if (!DINGTALK_APP_KEY || !DINGTALK_APP_SECRET) {
  * ============================================================ */
 const TEMPLATE_CACHE_FILE = path.join(__dirname, '..', 'data', 'dingtalk_templates.json');
 
-/* 兜底：如果本地文件不存在，用这份默认列表 */
 const DEFAULT_TEMPLATES = [
   { name: '员工借款（备用金）', processCode: 'PROC-4003F0FD-65E5-402D-88D4-10CC9FE990EE' },
   { name: '访客登记', processCode: 'PROC-2204B391-DD90-440B-81DD-D5F146D30797' },
@@ -98,19 +97,25 @@ async function getAccessToken() {
   return accessToken;
 }
 
-/* 日期字符串 → 毫秒时间戳 */
-function parseDateTime(str) {
+/* ============================================================
+ * ⭐ 日期字符串 → 毫秒时间戳
+ *    - start: 默认补 00:00:00
+ *    - end:   传 true 时补 23:59:59（避免漏掉当天）
+ * ============================================================ */
+function parseDateTime(str, isEnd = false) {
   if (!str) return null;
   if (/^\d+$/.test(String(str))) return Number(str);
   const normalized = String(str).trim().replace(/\//g, '-');
   let dateStr = normalized;
-  if (normalized.length === 10) dateStr = normalized + ' 00:00:00';
+  if (normalized.length === 10) {
+    dateStr = normalized + (isEnd ? ' 23:59:59' : ' 00:00:00');
+  }
   const d = new Date(dateStr.replace(' ', 'T') + '+08:00');
   if (isNaN(d.getTime())) throw new Error(`无法解析日期时间：${str}`);
   return d.getTime();
 }
 
-/* 分页拉取单个 processCode 的实例 ID */
+/* 分页拉取单个 processCode 的实例 ID（新版接口，token 走 Header） */
 async function fetchProcessInstanceIds(processCode, startTime, endTime) {
   const accessToken = await getAccessToken();
   const allIds = [];
@@ -243,18 +248,17 @@ async function fetchInstanceDetail(instanceId) {
   };
 }
 
-/* ============================================================
- * ⭐ 从钉钉拉取模板（供"更新"接口调用）
- * ============================================================ */
+/* 从钉钉拉取模板（供"更新"接口调用） */
 async function fetchTemplatesFromDingTalk() {
   const accessToken = await getAccessToken();
   const url = `https://oapi.dingtalk.com/topapi/process/listbyuserid?access_token=${accessToken}`;
   const response = await axios.post(url, { offset: 0, size: 100 });
   const data = response.data;
-  
-    console.log('========== [DingTalk] 原始返回 ==========');
-    console.log(JSON.stringify(data, null, 2));
-    console.log('======================================');
+
+  console.log('========== [DingTalk] 模板接口原始返回 ==========');
+  console.log(JSON.stringify(data, null, 2));
+  console.log('===============================================');
+
   if (data.errcode !== 0) throw new Error(`获取模板失败：${data.errmsg}`);
   return (data.result?.process_list || []).map((t) => ({
     name: t.name,
@@ -280,18 +284,44 @@ router.get('/dingtalk/templates', async (req, res) => {
 });
 
 /* ============================================================
- * ⭐ 路由 1.5：手动更新模板（点击"更新模板"时调）
+ * 路由 1.5：手动更新模板
  * POST /api/dingtalk/templates/refresh
  * ============================================================ */
 router.post('/dingtalk/templates/refresh', async (req, res) => {
   try {
     console.log('[DingTalk] 开始从钉钉刷新模板列表…');
-    const templates = await fetchTemplatesFromDingTalk();
+    const accessToken = await getAccessToken();
+    const url = `https://oapi.dingtalk.com/topapi/process/listbyuserid?access_token=${accessToken}`;
+    const response = await axios.post(url, { offset: 0, size: 100 });
+    const raw = response.data;
+
+    console.log('========== [DingTalk] 刷新 · 原始返回 ==========');
+    console.log(JSON.stringify(raw, null, 2));
+    console.log('============================================');
+
+    if (raw.errcode !== 0) {
+      return res.status(500).json({
+        errorcode: raw.errcode,
+        errormsg: raw.errmsg,
+      });
+    }
+
+    const templates = (raw.result?.process_list || []).map((t) => ({
+      name: t.name,
+      processCode: t.process_code,
+    }));
+
     writeTemplateCache(templates);
+
     res.json({
       errorcode: 0,
       errormsg: '更新成功',
-      data: { count: templates.length, templates, source: 'dingtalk' },
+      data: {
+        count: templates.length,
+        templates,
+        source: 'dingtalk',
+        raw,
+      },
     });
   } catch (error) {
     console.error('[DingTalk] 更新模板失败:', error.message);
@@ -299,6 +329,29 @@ router.post('/dingtalk/templates/refresh', async (req, res) => {
       errorcode: 500,
       errormsg: error.response?.data?.errmsg || error.message || '更新失败',
     });
+  }
+});
+
+/* ============================================================
+ * 路由 1.6：调试接口 - 返回原始模板数据
+ * GET /api/dingtalk/templates/raw
+ * ============================================================ */
+router.get('/dingtalk/templates/raw', async (req, res) => {
+  try {
+    console.log('[DingTalk] 拉取原始模板数据…');
+    const accessToken = await getAccessToken();
+    const url = `https://oapi.dingtalk.com/topapi/process/listbyuserid?access_token=${accessToken}`;
+    const response = await axios.post(url, { offset: 0, size: 100 });
+    const data = response.data;
+
+    console.log('========== [DingTalk] 原始返回 ==========');
+    console.log(JSON.stringify(data, null, 2));
+    console.log('======================================');
+
+    res.json({ errorcode: 0, errormsg: '获取成功', data });
+  } catch (error) {
+    console.error('[DingTalk] 拉原始数据失败:', error.message);
+    res.status(500).json({ errorcode: 500, errormsg: error.message });
   }
 });
 
@@ -311,8 +364,9 @@ router.get('/dingtalk/process-list', async (req, res) => {
     if (!start || !end) return res.status(400).json({ errorcode: 400, errormsg: '缺少 start / end' });
     if (!processCode) return res.status(400).json({ errorcode: 400, errormsg: '缺少 processCode' });
 
-    const startTs = parseDateTime(start);
-    const endTs = parseDateTime(end);
+    /* ⭐ end 补 23:59:59 */
+    const startTs = parseDateTime(start, false);
+    const endTs = parseDateTime(end, true);
     if (startTs >= endTs) return res.status(400).json({ errorcode: 400, errormsg: 'start 必须早于 end' });
 
     const maxSpan = 120 * 24 * 60 * 60 * 1000;
@@ -331,7 +385,7 @@ router.get('/dingtalk/process-list', async (req, res) => {
 });
 
 /* ============================================================
- * 路由 3：报告接口（读缓存的模板列表）
+ * 路由 3：【核心】报告接口
  * ============================================================ */
 router.get('/dingtalk/report', async (req, res) => {
   const t0 = Date.now();
@@ -342,8 +396,9 @@ router.get('/dingtalk/report', async (req, res) => {
       return res.status(400).json({ errorcode: 400, errormsg: '缺少 start / end' });
     }
 
-    const startTs = parseDateTime(start);
-    const endTs = parseDateTime(end);
+    /* ⭐ end 补 23:59:59 */
+    const startTs = parseDateTime(start, false);
+    const endTs = parseDateTime(end, true);
     if (startTs >= endTs) return res.status(400).json({ errorcode: 400, errormsg: 'start 必须早于 end' });
 
     const maxSpan = 120 * 24 * 60 * 60 * 1000;
@@ -351,7 +406,7 @@ router.get('/dingtalk/report', async (req, res) => {
       return res.status(400).json({ errorcode: 400, errormsg: '时间跨度不能超过 120 天' });
     }
 
-    /* ⭐ 1) 从本地缓存读模板（不调钉钉） */
+    /* 1) 从本地缓存读模板 */
     let templates = readTemplateCache();
     console.log(`[DingTalk][report] 缓存模板数：${templates.length}`);
 
