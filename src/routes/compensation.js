@@ -99,6 +99,7 @@ function ensureOpsManager(positions) {
       },
     ],
     extraNote: '佣金 = 店长销售 × 3%',
+    rewards: [],
   });
   return positions;
 }
@@ -155,6 +156,10 @@ router.get('/compensation/plan', async (req, res) => {
       const [gt] = await pool.query(`SELECT * FROM gender_salary_tier WHERE position_id = ?`, [p.id]);
       const [cc] = await pool.query(`SELECT * FROM course_commission WHERE position_id = ?`, [p.id]);
       const [of] = await pool.query(`SELECT * FROM old_class_fee_tier WHERE position_id = ?`, [p.id]);
+      const [rw] = await pool.query(
+        `SELECT * FROM position_reward WHERE position_id = ? ORDER BY id ASC`,
+        [p.id]
+      );
 
       p.commissionTiers = ct.map((x) => ({
         id: String(x.id),
@@ -193,23 +198,25 @@ router.get('/compensation/plan', async (req, res) => {
         fee: Number(x.fee),
         note: x.note || undefined,
       }));
+      p.rewards = rw.map((x) => ({
+        rewardId: x.reward_id,
+        amountOverride:
+          x.amount_override != null ? Number(x.amount_override) : undefined,
+        enabled: !!x.enabled,
+        note: x.note || undefined,
+      }));
 
       p.oldClassFee = p.old_class_fee != null ? Number(p.old_class_fee) : undefined;
       p.headcount = Number(p.headcount);
       p.performanceTarget = Number(p.performance_target);
       p.totalBaseSalary = Number(p.total_base_salary);
-
       p.disabled = !!p.disabled;
       p.managerAggregateByDept = !!p.manager_aggregate_by_dept;
       p.managerIncludeSelf = !!p.manager_include_self;
 
       if (p.calc_flags != null) {
         if (typeof p.calc_flags === 'string') {
-          try {
-            p.calcFlags = JSON.parse(p.calc_flags);
-          } catch {
-            p.calcFlags = undefined;
-          }
+          try { p.calcFlags = JSON.parse(p.calc_flags); } catch { p.calcFlags = undefined; }
         } else {
           p.calcFlags = p.calc_flags;
         }
@@ -224,6 +231,49 @@ router.get('/compensation/plan', async (req, res) => {
     plan.periodLabel = plan.period_label;
     plan.importedFrom = plan.imported_from;
     plan.importedAt = plan.imported_at;
+
+    /* ⭐ 部门奖金 */
+    const [drw] = await pool.query(
+      `SELECT department, reward_id, amount_override, enabled, note
+         FROM department_reward
+        WHERE plan_id = ?
+        ORDER BY id ASC`,
+      [plan.id]
+    );
+    const departmentRewards = {};
+    drw.forEach((x) => {
+      if (!departmentRewards[x.department]) departmentRewards[x.department] = [];
+      departmentRewards[x.department].push({
+        rewardId: x.reward_id,
+        amountOverride:
+          x.amount_override != null ? Number(x.amount_override) : undefined,
+        enabled: !!x.enabled,
+        note: x.note || undefined,
+      });
+    });
+    plan.departmentRewards = departmentRewards;
+
+    /* ⭐ 临时奖金（含 reward_id 引用奖金库） */
+    const [trw] = await pool.query(
+      `SELECT id, staff_id, name, amount, note, reward_id
+         FROM temp_reward
+        WHERE plan_id = ?
+        ORDER BY id ASC`,
+      [plan.id]
+    );
+    const tempRewards = {};
+    trw.forEach((x) => {
+      const sid = String(x.staff_id);
+      if (!tempRewards[sid]) tempRewards[sid] = [];
+      tempRewards[sid].push({
+        id: `db_${x.id}`,
+        name: x.name,
+        amount: Number(x.amount),
+        note: x.note || undefined,
+        rewardId: x.reward_id || undefined,
+      });
+    });
+    plan.tempRewards = tempRewards;
 
     ensureOpsManager(plan.positions);
 
@@ -240,7 +290,14 @@ router.get('/compensation/plan', async (req, res) => {
 router.post('/compensation/plan', async (req, res) => {
   const conn = await pool.getConnection();
   try {
-    const { storeId, month, periodLabel, positions } = req.body;
+    const {
+      storeId,
+      month,
+      periodLabel,
+      positions,
+      departmentRewards,
+      tempRewards,
+    } = req.body;
     if (!storeId || !month || !Array.isArray(positions)) {
       return res.status(400).json({ errorcode: 400, errormsg: 'storeId/month/positions required' });
     }
@@ -248,9 +305,7 @@ router.post('/compensation/plan', async (req, res) => {
     const ok = await requirePlanEdit(req, storeId);
     if (!ok) {
       conn.release();
-      return res
-        .status(403)
-        .json({ errorcode: 403, errormsg: '无权限：设置方案' });
+      return res.status(403).json({ errorcode: 403, errormsg: '无权限：设置方案' });
     }
 
     await conn.beginTransaction();
@@ -360,6 +415,71 @@ router.post('/compensation/plan', async (req, res) => {
           [posId, toNumOrZero(o.threshold), toNumOrZero(o.fee), toStr(o.note)]
         );
       }
+
+      /* ⭐ 职位奖金 */
+      for (const rw of p.rewards || []) {
+        const rid = toStr(rw.rewardId);
+        if (!rid) continue;
+        await conn.query(
+          `INSERT INTO position_reward
+            (position_id, reward_id, amount_override, enabled, note)
+           VALUES (?, ?, ?, ?, ?)`,
+          [
+            posId,
+            rid,
+            toNum(rw.amountOverride),
+            toBit(rw.enabled !== false),
+            toStr(rw.note),
+          ]
+        );
+      }
+    }
+
+    /* ⭐ 部门奖金 */
+    if (departmentRewards && typeof departmentRewards === 'object') {
+      for (const [dept, list] of Object.entries(departmentRewards)) {
+        if (!Array.isArray(list)) continue;
+        for (const rw of list) {
+          const rid = toStr(rw.rewardId);
+          if (!rid) continue;
+          await conn.query(
+            `INSERT INTO department_reward
+              (plan_id, department, reward_id, amount_override, enabled, note)
+             VALUES (?, ?, ?, ?, ?, ?)`,
+            [
+              planId,
+              dept,
+              rid,
+              toNum(rw.amountOverride),
+              toBit(rw.enabled !== false),
+              toStr(rw.note),
+            ]
+          );
+        }
+      }
+    }
+
+    /* ⭐ 临时奖金（含 reward_id） */
+    if (tempRewards && typeof tempRewards === 'object') {
+      for (const [sid, list] of Object.entries(tempRewards)) {
+        if (!Array.isArray(list)) continue;
+        for (const rw of list) {
+          const name = toStr(rw.name);
+          if (!name) continue;
+          await conn.query(
+            `INSERT INTO temp_reward (plan_id, staff_id, name, amount, note, reward_id)
+             VALUES (?, ?, ?, ?, ?, ?)`,
+            [
+              planId,
+              String(sid),
+              name,
+              toNumOrZero(rw.amount),
+              toStr(rw.note),
+              toStr(rw.rewardId),
+            ]
+          );
+        }
+      }
     }
 
     await conn.commit();
@@ -393,6 +513,8 @@ router.delete('/compensation/plan', async (req, res) => {
       [store_id, month]
     );
     if (plans.length > 0) {
+      /* 子表：position_config / position_reward / department_reward / temp_reward
+         由外键 ON DELETE CASCADE 自动清理 */
       await pool.query(`DELETE FROM position_config WHERE plan_id = ?`, [plans[0].id]);
       await pool.query(`DELETE FROM monthly_compensation_plan WHERE id = ?`, [plans[0].id]);
     }
@@ -532,10 +654,7 @@ router.post('/compensation/plan/copy', async (req, res) => {
       const [cc] = await conn.query(`SELECT * FROM course_commission WHERE position_id = ?`, [p.id]);
       for (const c of cc) {
         const courseName = toStr(c.course_name) || toStr(c.courseName);
-        if (!courseName) {
-          console.warn(`[warn] copy 跳过空 course_name，position=${p.title}`);
-          continue;
-        }
+        if (!courseName) continue;
         const mode = toStr(c.mode) || 'percent';
         await conn.query(
           `INSERT INTO course_commission (position_id, course_name, mode, value, note)
@@ -551,6 +670,67 @@ router.post('/compensation/plan/copy', async (req, res) => {
           [newPosId, toNumOrZero(o.threshold), toNumOrZero(o.fee), toStr(o.note)]
         );
       }
+
+      /* ⭐ 复制职位奖金 */
+      const [prw] = await conn.query(
+        `SELECT * FROM position_reward WHERE position_id = ?`,
+        [p.id]
+      );
+      for (const rw of prw) {
+        await conn.query(
+          `INSERT INTO position_reward
+            (position_id, reward_id, amount_override, enabled, note)
+           VALUES (?, ?, ?, ?, ?)`,
+          [
+            newPosId,
+            rw.reward_id,
+            toNum(rw.amount_override),
+            toBit(rw.enabled),
+            toStr(rw.note),
+          ]
+        );
+      }
+    }
+
+    /* ⭐ 复制部门奖金 */
+    const [drw] = await conn.query(
+      `SELECT * FROM department_reward WHERE plan_id = ?`,
+      [srcPlan.id]
+    );
+    for (const rw of drw) {
+      await conn.query(
+        `INSERT INTO department_reward
+          (plan_id, department, reward_id, amount_override, enabled, note)
+         VALUES (?, ?, ?, ?, ?, ?)`,
+        [
+          newPlanId,
+          rw.department,
+          rw.reward_id,
+          toNum(rw.amount_override),
+          toBit(rw.enabled),
+          toStr(rw.note),
+        ]
+      );
+    }
+
+    /* ⭐ 复制临时奖金（含 reward_id） */
+    const [trw] = await conn.query(
+      `SELECT staff_id, name, amount, note, reward_id FROM temp_reward WHERE plan_id = ?`,
+      [srcPlan.id]
+    );
+    for (const r of trw) {
+      await conn.query(
+        `INSERT INTO temp_reward (plan_id, staff_id, name, amount, note, reward_id)
+         VALUES (?, ?, ?, ?, ?, ?)`,
+        [
+          newPlanId,
+          r.staff_id,
+          r.name,
+          toNumOrZero(r.amount),
+          toStr(r.note),
+          toStr(r.reward_id),
+        ]
+      );
     }
 
     await conn.commit();
@@ -684,9 +864,7 @@ router.post('/simulation/setting', async (req, res) => {
     if (user) {
       const ok = await userHasPermission(user.uid, 'simulation:access', storeId);
       if (!ok) {
-        return res
-          .status(403)
-          .json({ errorcode: 403, errormsg: '无权限：测算' });
+        return res.status(403).json({ errorcode: 403, errormsg: '无权限：测算' });
       }
     }
 
@@ -743,9 +921,7 @@ router.post('/simulation/setting/copy', async (req, res) => {
     if (user) {
       const ok = await userHasPermission(user.uid, 'simulation:access', storeId);
       if (!ok) {
-        return res
-          .status(403)
-          .json({ errorcode: 403, errormsg: '无权限：测算' });
+        return res.status(403).json({ errorcode: 403, errormsg: '无权限：测算' });
       }
     }
 

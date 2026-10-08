@@ -147,6 +147,47 @@ async function ensureTables() {
       FOREIGN KEY (position_id) REFERENCES position_config(id) ON DELETE CASCADE
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`,
 
+    /* ⭐ 新增：职位奖金（关联 position_config，随职位级联删除） */
+    `CREATE TABLE IF NOT EXISTS position_reward (
+      id              BIGINT PRIMARY KEY AUTO_INCREMENT,
+      position_id     BIGINT       NOT NULL,
+      reward_id       VARCHAR(64)  NOT NULL COMMENT '奖金库条目 ID',
+      amount_override DECIMAL(12,2) DEFAULT NULL COMMENT '覆盖金额（为空则用奖金库默认）',
+      enabled         TINYINT(1)   NOT NULL DEFAULT 1 COMMENT '是否启用',
+      note            VARCHAR(255) DEFAULT NULL,
+      created_at      DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      KEY idx_position (position_id),
+      FOREIGN KEY (position_id) REFERENCES position_config(id) ON DELETE CASCADE
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='职位奖金'`,
+
+    /* ⭐ 新增：部门奖金（关联方案，随方案级联删除） */
+    `CREATE TABLE IF NOT EXISTS department_reward (
+      id              BIGINT PRIMARY KEY AUTO_INCREMENT,
+      plan_id         BIGINT       NOT NULL,
+      department      VARCHAR(32)  NOT NULL COMMENT '会籍/私教/泳教/运营',
+      reward_id       VARCHAR(64)  NOT NULL COMMENT '奖金库条目 ID',
+      amount_override DECIMAL(12,2) DEFAULT NULL,
+      enabled         TINYINT(1)   NOT NULL DEFAULT 1,
+      note            VARCHAR(255) DEFAULT NULL,
+      created_at      DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      KEY idx_plan_dept (plan_id, department),
+      FOREIGN KEY (plan_id) REFERENCES monthly_compensation_plan(id) ON DELETE CASCADE
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='部门奖金'`,
+     
+    /* ⭐ 临时奖金 / 扣款 */
+    `CREATE TABLE IF NOT EXISTS temp_reward (
+      id          BIGINT PRIMARY KEY AUTO_INCREMENT,
+      plan_id     BIGINT       NOT NULL,
+      staff_id    VARCHAR(64)  NOT NULL,
+      name        VARCHAR(64)  NOT NULL,
+      amount      DECIMAL(12,2) NOT NULL,
+      note        VARCHAR(255) DEFAULT NULL,
+      reward_id   VARCHAR(64)  DEFAULT NULL,     -- ⭐ 新增
+      created_at  DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      KEY idx_plan_staff (plan_id, staff_id),
+      FOREIGN KEY (plan_id) REFERENCES monthly_compensation_plan(id) ON DELETE CASCADE
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='临时奖金/扣款'`,
+
     /* 测算设置 */
     `CREATE TABLE IF NOT EXISTS simulation_setting (
       id              BIGINT PRIMARY KEY AUTO_INCREMENT,
@@ -175,7 +216,7 @@ async function ensureTables() {
       FOREIGN KEY (granted_by) REFERENCES admin_user(id) ON DELETE SET NULL
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`,
 
-    /* ⭐ 新增：薪酬计算-员工新人/排除状态 */
+    /* 薪酬计算-员工新人/排除状态 */
     `CREATE TABLE IF NOT EXISTS payroll_staff_status (
       id          BIGINT PRIMARY KEY AUTO_INCREMENT,
       bus_id      VARCHAR(64) NOT NULL COMMENT '门店 ID',
