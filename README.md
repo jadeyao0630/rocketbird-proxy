@@ -1,7 +1,9 @@
-.env 
+# ⭐ local 配置
 PORT=4000 
 FRONTEND_ORIGIN=http://localhost:5173 
 TARGET_BASE=https://wx.rocketbird.cn
+ADMIN_USERNAME=admin
+ADMIN_PASSWORD=admin123
 
 # ⭐ MySQL 配置
 DB_HOST=192.168.10.242
@@ -10,9 +12,7 @@ DB_USER=luke
 DB_PASSWORD=Qijiashe6@
 DB_NAME=gym_payroll
 
-ADMIN_USERNAME=admin
-ADMIN_PASSWORD=admin123
-
+# ⭐ Dingtalk 配置
 DINGTALK_APP_KEY=dingwgiupnlljdhbx6iz
 DINGTALK_APP_SECRET=2klE7vYiPsVwDQ-OMwaGV2tITU5eaJby7lVRzeoDCD1H2U4C6cJx1HDLooWhxrsc
 DINGTALK_ADMIN_USERID=023155462846742902
