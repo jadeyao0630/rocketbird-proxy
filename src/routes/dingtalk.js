@@ -4,6 +4,9 @@ const fs = require('fs');
 const path = require('path');
 const router = express.Router();
 
+const cache = require('../services/dingtalkCache');
+const dingtalkSync = require('../services/dingtalkSync');
+
 const DINGTALK_APP_KEY = process.env.DINGTALK_APP_KEY;
 const DINGTALK_APP_SECRET = process.env.DINGTALK_APP_SECRET;
 
@@ -13,10 +16,12 @@ if (!DINGTALK_APP_KEY || !DINGTALK_APP_SECRET) {
   );
 }
 
-/* ============================================================
- * 模板缓存
- * ============================================================ */
-const TEMPLATE_CACHE_FILE = path.join(__dirname, '..', 'data', 'dingtalk_templates.json');
+const TEMPLATE_CACHE_FILE = path.join(
+  __dirname,
+  '..',
+  'data',
+  'dingtalk_templates.json'
+);
 
 const DEFAULT_TEMPLATES = [
   { name: '员工借款（备用金）', processCode: 'PROC-4003F0FD-65E5-402D-88D4-10CC9FE990EE' },
@@ -66,16 +71,17 @@ function readTemplateCache() {
 function writeTemplateCache(templates) {
   try {
     ensureDataDir();
-    fs.writeFileSync(TEMPLATE_CACHE_FILE, JSON.stringify(templates, null, 2), 'utf-8');
+    fs.writeFileSync(
+      TEMPLATE_CACHE_FILE,
+      JSON.stringify(templates, null, 2),
+      'utf-8'
+    );
     console.log(`[DingTalk] 模板缓存已更新：${templates.length} 个`);
   } catch (e) {
     console.error('[DingTalk] 写入模板缓存失败:', e.message);
   }
 }
 
-/* ============================================================
- * access_token 缓存
- * ============================================================ */
 let tokenCache = { token: null, expiresAt: 0 };
 
 async function getAccessToken() {
@@ -98,27 +104,20 @@ async function getAccessToken() {
   return accessToken;
 }
 
-/* ============================================================
- * 用户 ID → 姓名 缓存
- * ============================================================ */
 const userNameCache = new Map();
 
 async function fetchUserName(userId) {
   if (!userId) return '';
   if (userNameCache.has(userId)) return userNameCache.get(userId);
-
-  /* 长 ID（>30 位）大概率是外部人，不查 */
   if (String(userId).length > 30) {
     userNameCache.set(userId, '');
     return '';
   }
-
   try {
     const accessToken = await getAccessToken();
     const url = `https://oapi.dingtalk.com/topapi/v2/user/get?access_token=${accessToken}`;
     const response = await axios.post(url, { userid: userId });
     const data = response.data;
-
     if (data.errcode === 0 && data.result?.name) {
       const name = data.result.name;
       userNameCache.set(userId, name);
@@ -134,11 +133,9 @@ async function fetchUserName(userId) {
 
 async function enrichOperationRecords(records) {
   if (!Array.isArray(records) || records.length === 0) return records;
-
   const uniqueIds = Array.from(
     new Set(records.map((r) => r.userId).filter(Boolean))
   );
-
   const nameMap = new Map();
   await Promise.all(
     uniqueIds.map(async (id) => {
@@ -146,7 +143,6 @@ async function enrichOperationRecords(records) {
       nameMap.set(id, name);
     })
   );
-
   return records.map((r) => ({
     ...r,
     userName: nameMap.get(r.userId) || '',
@@ -155,11 +151,9 @@ async function enrichOperationRecords(records) {
 
 async function extractPendingApprovers(tasks) {
   if (!Array.isArray(tasks) || tasks.length === 0) return [];
-
   const running = tasks.filter(
     (t) => String(t.task_status || '').toUpperCase() === 'RUNNING'
   );
-
   const result = [];
   const seen = new Set();
   for (const t of running) {
@@ -172,18 +166,16 @@ async function extractPendingApprovers(tasks) {
   return result;
 }
 
-/* ============================================================
- * 日期字符串 → 毫秒时间戳
- * ============================================================ */
 function parseDateTime(str, isEnd = false) {
   if (!str) return null;
   if (/^\d+$/.test(String(str))) return Number(str);
-  const normalized = String(str).trim().replace(/\//g, '-');
-  let dateStr = normalized;
-  if (normalized.length === 10) {
-    dateStr = normalized + (isEnd ? ' 23:59:59' : ' 00:00:00');
+  const s = String(str).trim().replace(/\//g, '-');
+  const datePart = s.slice(0, 10);
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(datePart)) {
+    throw new Error(`无法解析日期：${str}`);
   }
-  const d = new Date(dateStr.replace(' ', 'T') + '+08:00');
+  const timePart = isEnd ? ' 23:59:59' : ' 00:00:00';
+  const d = new Date(datePart.replace(' ', 'T') + timePart + '+08:00');
   if (isNaN(d.getTime())) throw new Error(`无法解析日期时间：${str}`);
   return d.getTime();
 }
@@ -197,8 +189,16 @@ async function fetchProcessInstanceIds(processCode, startTime, endTime) {
 
   while (hasMore && pageCount < 50) {
     pageCount++;
-    const url = 'https://api.dingtalk.com/v1.0/workflow/processes/instanceIds/query';
-    const payload = { processCode, startTime, endTime, nextToken: nextCursor, maxResults: 20 };
+    const url =
+      'https://api.dingtalk.com/v1.0/workflow/processes/instanceIds/query';
+    const payload = {
+      processCode,
+      startTime,
+      endTime,
+      nextToken: nextCursor,
+      maxResults: 20,
+    };
+    const started = Date.now();
     const response = await axios.post(url, payload, {
       headers: {
         'x-acs-dingtalk-access-token': accessToken,
@@ -209,6 +209,10 @@ async function fetchProcessInstanceIds(processCode, startTime, endTime) {
     if (data.result?.list) allIds.push(...data.result.list);
     nextCursor = data.result?.nextToken;
     hasMore = !!nextCursor;
+    const elapsed = Date.now() - started;
+    if (elapsed < 100) {
+      await new Promise((r) => setTimeout(r, 100 - elapsed));
+    }
   }
   return allIds;
 }
@@ -217,15 +221,27 @@ function extractPaymentUnit(formValues) {
   const keys = Object.keys(formValues);
   const norm = (k) => String(k).replace(/[\s\t]+/g, '');
   const normalizedMap = {};
-  keys.forEach((k) => { normalizedMap[norm(k)] = formValues[k]; });
-
-  const candidates = ['付款单位全称', '付款单位', '付款公司', '付款主体', '付款方'];
+  keys.forEach((k) => {
+    normalizedMap[norm(k)] = formValues[k];
+  });
+  const candidates = [
+    '付款单位全称',
+    '付款单位',
+    '付款公司',
+    '付款主体',
+    '付款方',
+  ];
   for (const c of candidates) {
     if (normalizedMap[c] !== undefined) return normalizedMap[c];
   }
   const fuzzy = keys.find((k) => {
     const n = norm(k);
-    return n.includes('付款单位') || n.includes('付款公司') || n.includes('付款主体') || n.includes('付款方');
+    return (
+      n.includes('付款单位') ||
+      n.includes('付款公司') ||
+      n.includes('付款主体') ||
+      n.includes('付款方')
+    );
   });
   return fuzzy ? formValues[fuzzy] : null;
 }
@@ -234,7 +250,9 @@ function extractPayeeAccount(formValues) {
   const keys = Object.keys(formValues);
   const norm = (k) => String(k).replace(/[\s\t]+/g, '');
   const normalizedMap = {};
-  keys.forEach((k) => { normalizedMap[norm(k)] = formValues[k]; });
+  keys.forEach((k) => {
+    normalizedMap[norm(k)] = formValues[k];
+  });
   const candidates = ['收款账户', '收款人', '收款方', '收款单位'];
   for (const c of candidates) {
     if (normalizedMap[c] !== undefined) return normalizedMap[c];
@@ -253,7 +271,8 @@ function parseDetailList(formValues) {
       const item = { rowNumber: row.rowNumber || '', content: '', amount: '' };
       rowValue.forEach((f) => {
         if (f.label === '事项') item.content = String(f.value || '');
-        else if (f.label === '金额（元）' || f.label === '金额') item.amount = String(f.value || '');
+        else if (f.label === '金额（元）' || f.label === '金额')
+          item.amount = String(f.value || '');
       });
       return item;
     });
@@ -265,8 +284,9 @@ function parseDetailList(formValues) {
 function extractAmount(formValues) {
   const norm = (k) => String(k).replace(/[\s\t]+/g, '');
   const normalizedMap = {};
-  Object.keys(formValues).forEach((k) => { normalizedMap[norm(k)] = formValues[k]; });
-
+  Object.keys(formValues).forEach((k) => {
+    normalizedMap[norm(k)] = formValues[k];
+  });
   const candidates = [
     '补退金额（元）',
     '借款金额（元）',
@@ -277,7 +297,11 @@ function extractAmount(formValues) {
   ];
   for (const c of candidates) {
     const key = norm(c);
-    if (normalizedMap[key] !== undefined && normalizedMap[key] !== 'null' && normalizedMap[key] !== '') {
+    if (
+      normalizedMap[key] !== undefined &&
+      normalizedMap[key] !== 'null' &&
+      normalizedMap[key] !== ''
+    ) {
       return normalizedMap[key];
     }
   }
@@ -289,8 +313,8 @@ async function fetchInstanceDetail(instanceId) {
   const url = `https://oapi.dingtalk.com/topapi/processinstance/get?access_token=${accessToken}`;
   const response = await axios.post(url, { process_instance_id: instanceId });
   const data = response.data;
-
-  if (data.errcode !== 0) throw new Error(`实例 ${instanceId} 获取失败：${data.errmsg}`);
+  if (data.errcode !== 0)
+    throw new Error(`实例 ${instanceId} 获取失败：${data.errmsg}`);
 
   const inst = data.process_instance;
   const formValues = {};
@@ -346,9 +370,7 @@ router.get('/dingtalk/templates', async (req, res) => {
   }
 });
 
-/* ============================================================
- * 路由 1.5：手动更新模板
- * ============================================================ */
+/* 路由 1.5：手动更新模板 */
 router.post('/dingtalk/templates/refresh', async (req, res) => {
   try {
     console.log('[DingTalk] 开始从钉钉刷新模板列表…');
@@ -356,18 +378,16 @@ router.post('/dingtalk/templates/refresh', async (req, res) => {
     const url = `https://oapi.dingtalk.com/topapi/process/listbyuserid?access_token=${accessToken}`;
     const response = await axios.post(url, { offset: 0, size: 100 });
     const raw = response.data;
-
     if (raw.errcode !== 0) {
-      return res.status(500).json({ errorcode: raw.errcode, errormsg: raw.errmsg });
+      return res
+        .status(500)
+        .json({ errorcode: raw.errcode, errormsg: raw.errmsg });
     }
-
     const templates = (raw.result?.process_list || []).map((t) => ({
       name: t.name,
       processCode: t.process_code,
     }));
-
     writeTemplateCache(templates);
-
     res.json({
       errorcode: 0,
       errormsg: '更新成功',
@@ -382,27 +402,37 @@ router.post('/dingtalk/templates/refresh', async (req, res) => {
   }
 });
 
-/* ============================================================
- * 路由 2：单个模板拉取实例 ID
- * ============================================================ */
+/* 路由 2：单个模板拉取实例 ID */
 router.get('/dingtalk/process-list', async (req, res) => {
   try {
     const { start, end, processCode } = req.query;
-    if (!start || !end) return res.status(400).json({ errorcode: 400, errormsg: '缺少 start / end' });
-    if (!processCode) return res.status(400).json({ errorcode: 400, errormsg: '缺少 processCode' });
+    if (!start || !end)
+      return res.status(400).json({ errorcode: 400, errormsg: '缺少 start / end' });
+    if (!processCode)
+      return res.status(400).json({ errorcode: 400, errormsg: '缺少 processCode' });
 
     const startTs = parseDateTime(start, false);
     const endTs = parseDateTime(end, true);
-    if (startTs >= endTs) return res.status(400).json({ errorcode: 400, errormsg: 'start 必须早于 end' });
+    if (startTs >= endTs)
+      return res.status(400).json({ errorcode: 400, errormsg: 'start 必须早于 end' });
 
     const maxSpan = 120 * 24 * 60 * 60 * 1000;
-    if (endTs - startTs > maxSpan) return res.status(400).json({ errorcode: 400, errormsg: '时间跨度不能超过 120 天' });
+    if (endTs - startTs > maxSpan)
+      return res
+        .status(400)
+        .json({ errorcode: 400, errormsg: '时间跨度不能超过 120 天' });
 
     const ids = await fetchProcessInstanceIds(processCode, startTs, endTs);
     res.json({
       errorcode: 0,
       errormsg: '获取成功',
-      data: { processCode, startTime: startTs, endTime: endTs, count: ids.length, instanceIds: ids },
+      data: {
+        processCode,
+        startTime: startTs,
+        endTime: endTs,
+        count: ids.length,
+        instanceIds: ids,
+      },
     });
   } catch (error) {
     console.error('[DingTalk] 拉取失败:', error.message);
@@ -419,16 +449,36 @@ router.get('/dingtalk/report', async (req, res) => {
     const { start, end, type, company, includeRaw } = req.query;
 
     if (!start || !end) {
-      return res.status(400).json({ errorcode: 400, errormsg: '缺少 start / end' });
+      return res
+        .status(400)
+        .json({ errorcode: 400, errormsg: '缺少 start / end' });
     }
 
     const startTs = parseDateTime(start, false);
     const endTs = parseDateTime(end, true);
-    if (startTs >= endTs) return res.status(400).json({ errorcode: 400, errormsg: 'start 必须早于 end' });
+
+    const fmt = (ts) => {
+      const d = new Date(Number(ts) + 8 * 60 * 60 * 1000);
+      const p = (n) => String(n).padStart(2, '0');
+      return `${d.getUTCFullYear()}-${p(d.getUTCMonth() + 1)}-${p(
+        d.getUTCDate()
+      )} ${p(d.getUTCHours())}:${p(d.getUTCMinutes())}:${p(d.getUTCSeconds())}`;
+    };
+    console.log(
+      `[DingTalk][report] 时间范围（北京时间）：${fmt(startTs)} ~ ${fmt(endTs)}（原始参数：${start} ~ ${end}）`
+    );
+
+    if (startTs >= endTs) {
+      return res
+        .status(400)
+        .json({ errorcode: 400, errormsg: 'start 必须早于 end' });
+    }
 
     const maxSpan = 120 * 24 * 60 * 60 * 1000;
     if (endTs - startTs > maxSpan) {
-      return res.status(400).json({ errorcode: 400, errormsg: '时间跨度不能超过 120 天' });
+      return res
+        .status(400)
+        .json({ errorcode: 400, errormsg: '时间跨度不能超过 120 天' });
     }
 
     let templates = readTemplateCache();
@@ -445,7 +495,6 @@ router.get('/dingtalk/report', async (req, res) => {
         .split(/[,，\s|]+/)
         .map((k) => k.trim())
         .filter(Boolean);
-
       if (keywords.length > 0) {
         templates = templates.filter(
           (t) => t.name && keywords.some((k) => t.name.includes(k))
@@ -464,87 +513,166 @@ router.get('/dingtalk/report', async (req, res) => {
       });
     }
 
-    /* 1) 拉实例 ID */
     const templateResults = [];
     for (const tpl of templates) {
       try {
-        const ids = await fetchProcessInstanceIds(tpl.processCode, startTs, endTs);
+        const ids = await fetchProcessInstanceIds(
+          tpl.processCode,
+          startTs,
+          endTs
+        );
         templateResults.push({ ...tpl, instanceIds: ids });
         console.log(`[DingTalk][report] ${tpl.name}: ${ids.length} 个实例`);
       } catch (e) {
         templateResults.push({ ...tpl, instanceIds: [], error: e.message });
-        console.error(`[DingTalk][report] ${tpl.name} 拉实例失败: ${e.message}`);
+        console.error(
+          `[DingTalk][report] ${tpl.name} 拉实例失败: ${e.message}`
+        );
       }
     }
 
-    /* ============================================================
-     * ⭐ 2) 串行拉实例详情 + 节流（避免触发钉钉 QPS 限流 20/秒）
-     * ============================================================ */
-    const allDetails = [];
-    const FLOW_INTERVAL_MS = 100; // 100ms/次 = 10 QPS，安全
+    const processCodes = templateResults.map((t) => t.processCode);
 
-    for (const tr of templateResults) {
-      for (const id of tr.instanceIds) {
-        const started = Date.now();
-        try {
-          const detail = await fetchInstanceDetail(id);
-          allDetails.push({
-            templateName: tr.name,
-            processCode: tr.processCode,
-            ...detail,
-          });
-        } catch (e) {
-          allDetails.push({
-            templateName: tr.name,
-            processCode: tr.processCode,
-            processInstanceId: id,
-            error: e.message,
-          });
-        }
-        /* ⭐ 控制速率 */
-        const elapsed = Date.now() - started;
-        if (elapsed < FLOW_INTERVAL_MS) {
-          await new Promise((r) => setTimeout(r, FLOW_INTERVAL_MS - elapsed));
-        }
+    let cachedFinals = [];
+    try {
+      cachedFinals = await cache.getCachedFinals(startTs, endTs, processCodes);
+      console.log(
+        `[DingTalk][report] 缓存命中（is_final=1）：${cachedFinals.length} 条`
+      );
+    } catch (e) {
+      console.error('[DingTalk][report] 查缓存失败', e.message);
+    }
+
+    const allInstanceIds = [];
+    templateResults.forEach((tr) => {
+      tr.instanceIds.forEach((id) => allInstanceIds.push(id));
+    });
+
+    const finalIds = await cache
+      .getFinalIds(allInstanceIds)
+      .catch(() => new Set());
+    const needFetchIds = allInstanceIds.filter((id) => !finalIds.has(id));
+
+    console.log(
+      `[DingTalk][report] 需从钉钉拉取：${needFetchIds.length} / ${allInstanceIds.length}（缓存跳过 ${finalIds.size}）`
+    );
+
+    const idToTpl = new Map();
+    templateResults.forEach((tr) => {
+      tr.instanceIds.forEach((id) => {
+        idToTpl.set(id, { name: tr.name, code: tr.processCode });
+      });
+    });
+
+    const freshDetails = [];
+    const FLOW_INTERVAL_MS = 100;
+
+    for (const id of needFetchIds) {
+      const started = Date.now();
+      const tpl = idToTpl.get(id) || {};
+      try {
+        const detail = await fetchInstanceDetail(id);
+        freshDetails.push({
+          templateName: tpl.name,
+          processCode: tpl.code,
+          ...detail,
+        });
+      } catch (e) {
+        freshDetails.push({
+          templateName: tpl.name,
+          processCode: tpl.code,
+          processInstanceId: id,
+          error: e.message,
+        });
+      }
+      const elapsed = Date.now() - started;
+      if (elapsed < FLOW_INTERVAL_MS) {
+        await new Promise((r) => setTimeout(r, FLOW_INTERVAL_MS - elapsed));
       }
     }
 
-    /* 3) 按付款单位过滤 */
-    let filtered = allDetails;
+    /* 3.7 写缓存 */
+    try {
+      const valid = freshDetails.filter((d) => !d.error);
+
+      /* ⭐ 写缓存前先按门店归属，保证缓存里就是归属后的 payment_unit */
+      valid.forEach((d) => {
+        const r = dingtalkSync.resolveMemberRefundPaymentUnit(
+          d.templateName,
+          d.formValues || {},
+          d.paymentUnit,
+          d.createTime
+        );
+        d.paymentUnit = r.paymentUnit;
+        if (d.templateName === dingtalkSync.MEMBER_REFUND_TEMPLATE) {
+          d.formValues = {
+            ...(d.formValues || {}),
+            __autoAssigned: r.autoAssigned ? '1' : '0',
+            __storeName: r.storeName || '',
+            __assignReason: r.reason || '',
+          };
+        }
+      });
+
+      const groupMap = new Map();
+      valid.forEach((d) => {
+        const key = `${d.templateName || ''}||${d.processCode || ''}`;
+        if (!groupMap.has(key)) {
+          groupMap.set(key, {
+            templateName: d.templateName || '',
+            processCode: d.processCode || '',
+            items: [],
+          });
+        }
+        groupMap.get(key).items.push(d);
+      });
+
+      for (const g of groupMap.values()) {
+        if (g.items.length === 0) continue;
+        await cache.upsertMany(g.items, g.templateName, g.processCode);
+      }
+
+      console.log(
+        `[DingTalk][report] 写入缓存：${valid.length} 条（${groupMap.size} 个分组）`
+      );
+    } catch (e) {
+      console.error('[DingTalk][report] 写缓存失败', e.message);
+    }
+
+    /* 3.8 合并 */
+    let filtered = [...cachedFinals, ...freshDetails];
+
     if (company) {
       const keyword = String(company).trim();
       filtered = filtered.filter(
         (d) => d.paymentUnit && d.paymentUnit.includes(keyword)
       );
       console.log(
-        `[DingTalk][report] 付款单位过滤"${keyword}"：${allDetails.length} → ${filtered.length}`
+        `[DingTalk][report] 付款单位过滤"${keyword}"：${cachedFinals.length + freshDetails.length} → ${filtered.length}`
       );
     }
 
-    /* 4) 按「只看已通过」过滤 */
-    const onlyApproved = req.query.onlyApproved !== '0';
-    console.log(
-      `[DingTalk][report] onlyApproved = ${onlyApproved}（原始值：${JSON.stringify(req.query.onlyApproved)}）`
-    );
-
-    if (onlyApproved) {
-      const before = filtered.length;
-      const isCompleted = (s) => String(s || '').toUpperCase() === 'COMPLETED';
-      const isAgreed = (r) => {
-        const v = String(r || '').toLowerCase();
-        return v === 'agree' || v === 'approved' || v === 'pass';
+    /* ⭐ 4.5 会员退费门店归属（兜底旧缓存） */
+    let autoAssignedCount = 0;
+    filtered = filtered.map((d) => {
+      const r = dingtalkSync.resolveMemberRefundPaymentUnit(
+        d.templateName,
+        d.formValues || {},
+        d.paymentUnit,
+        d.createTime
+      );
+      if (r.autoAssigned) autoAssignedCount++;
+      return {
+        ...d,
+        paymentUnit: r.paymentUnit,
+        _autoAssigned: r.autoAssigned,
+        _storeName: r.storeName,
+        _assignReason: r.reason,
       };
-      filtered = filtered.filter(
-        (d) => isCompleted(d.status) && isAgreed(d.result)
-      );
-      console.log(
-        `[DingTalk][report] 只保留已通过：${before} → ${filtered.length}`
-      );
-    } else {
-      console.log(
-        `[DingTalk][report] 不过滤状态，返回全部 ${filtered.length} 条`
-      );
-    }
+    });
+    console.log(
+      `[DingTalk][report] 门店自动归属：${autoAssignedCount} 条 / 共 ${filtered.length} 条`
+    );
 
     /* 5) 整理返回结构 */
     const results = filtered.map((d) => {
@@ -555,8 +683,8 @@ router.get('/dingtalk/report', async (req, res) => {
         title: d.title,
         status: d.status,
         result: d.result,
-        createTime: d.createTime,
-        finishTime: d.finishTime,
+        createTime: cache.normalizeDbTimeString(d.createTime) || '',
+        finishTime: cache.normalizeDbTimeString(d.finishTime) || '',
         paymentUnit: d.paymentUnit,
         payeeAccount: d.payeeAccount,
         amount: d.amount,
@@ -566,6 +694,10 @@ router.get('/dingtalk/report', async (req, res) => {
         originatorName: d.originatorName || '',
         pendingApprovers: d.pendingApprovers || [],
         error: d.error,
+        // ⭐ 门店归属标记
+        _autoAssigned: d._autoAssigned === true,
+        _storeName: d._storeName || null,
+        _assignReason: d._assignReason || '',
       };
       if (includeRaw === '1') {
         base.originatorUserId = d.originatorUserId;
@@ -576,7 +708,7 @@ router.get('/dingtalk/report', async (req, res) => {
 
     const cost = Date.now() - t0;
     console.log(
-      `[DingTalk][report] 完成：模板 ${templates.length} 个，实例 ${allDetails.length} 条，过滤后 ${results.length} 条，耗时 ${cost}ms`
+      `[DingTalk][report] 完成：模板 ${templates.length} 个，返回 ${results.length} 条，门店归属 ${autoAssignedCount} 条，耗时 ${cost}ms`
     );
 
     res.json({
@@ -589,11 +721,11 @@ router.get('/dingtalk/report', async (req, res) => {
           type: type || null,
           company: company || null,
           excludeTemplates: EXCLUDE_KEYWORDS,
-          onlyApproved,
         },
         totalTemplates: templates.length,
-        beforeFilterCount: allDetails.length,
+        beforeFilterCount: cachedFinals.length + freshDetails.length,
         totalCount: results.length,
+        autoAssignedCount,
         costMs: cost,
         results,
       },
@@ -607,14 +739,14 @@ router.get('/dingtalk/report', async (req, res) => {
   }
 });
 
-/* ============================================================
- * 路由 4：单个实例详情
- * ============================================================ */
+/* 路由 4：单个实例详情 */
 router.get('/dingtalk/instance-detail', async (req, res) => {
   try {
     const { processInstanceId } = req.query;
-    if (!processInstanceId) return res.status(400).json({ errorcode: 400, errormsg: '缺少 processInstanceId' });
-
+    if (!processInstanceId)
+      return res
+        .status(400)
+        .json({ errorcode: 400, errormsg: '缺少 processInstanceId' });
     const detail = await fetchInstanceDetail(processInstanceId);
     res.json({ errorcode: 0, errormsg: '获取成功', data: detail });
   } catch (error) {
@@ -622,16 +754,15 @@ router.get('/dingtalk/instance-detail', async (req, res) => {
   }
 });
 
-/* ============================================================
- * 路由 5：批量实例详情
- * ============================================================ */
+/* 路由 5：批量实例详情 */
 router.post('/dingtalk/instances-detail', async (req, res) => {
   try {
     const { instanceIds } = req.body || {};
     if (!Array.isArray(instanceIds) || instanceIds.length === 0) {
-      return res.status(400).json({ errorcode: 400, errormsg: '请提供 instanceIds 数组' });
+      return res
+        .status(400)
+        .json({ errorcode: 400, errormsg: '请提供 instanceIds 数组' });
     }
-
     const results = [];
     const FLOW_INTERVAL_MS = 100;
     for (const id of instanceIds) {
@@ -647,8 +778,11 @@ router.post('/dingtalk/instances-detail', async (req, res) => {
         await new Promise((r) => setTimeout(r, FLOW_INTERVAL_MS - elapsed));
       }
     }
-
-    res.json({ errorcode: 0, errormsg: '获取成功', data: { count: results.length, results } });
+    res.json({
+      errorcode: 0,
+      errormsg: '获取成功',
+      data: { count: results.length, results },
+    });
   } catch (error) {
     res.status(500).json({ errorcode: 500, errormsg: error.message });
   }

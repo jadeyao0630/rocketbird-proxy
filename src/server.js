@@ -19,12 +19,17 @@ const payrollStatusRoutes = require('./routes/payrollStatus');
 const dingtalkRoutes = require('./routes/dingtalk');
 const aiRoutes = require('./routes/ai');
 const monthlySummaryRoutes = require('./routes/monthlySummary');
+const dingtalkSyncConfigRoutes = require('./routes/dingtalkSyncConfig');
+
+/* ⭐ 钉钉定时同步 */
+const { startDingTalkSync } = require('./services/dingtalkSync');
 
 console.log('[boot] 路由模块加载情况：');
-console.log('  authRoutes           :', typeof authRoutes, authRoutes?.stack?.length);
-console.log('  dingtalkRoutes       :', typeof dingtalkRoutes, dingtalkRoutes?.stack?.length);
-console.log('  aiRoutes             :', typeof aiRoutes, aiRoutes?.stack?.length);
-console.log('  monthlySummaryRoutes :', typeof monthlySummaryRoutes, monthlySummaryRoutes?.stack?.length);
+console.log('  authRoutes               :', typeof authRoutes, authRoutes?.stack?.length);
+console.log('  dingtalkRoutes           :', typeof dingtalkRoutes, dingtalkRoutes?.stack?.length);
+console.log('  aiRoutes                 :', typeof aiRoutes, aiRoutes?.stack?.length);
+console.log('  monthlySummaryRoutes     :', typeof monthlySummaryRoutes, monthlySummaryRoutes?.stack?.length);
+console.log('  dingtalkSyncConfigRoutes :', typeof dingtalkSyncConfigRoutes, dingtalkSyncConfigRoutes?.stack?.length);
 
 const app = express();
 
@@ -66,6 +71,7 @@ app.use('/api', payrollStatusRoutes);
 app.use('/api', dingtalkRoutes);
 app.use('/api', aiRoutes);
 app.use('/api', monthlySummaryRoutes);
+app.use('/api', dingtalkSyncConfigRoutes);
 
 /* 健康检查 */
 app.get('/health', (req, res) => {
@@ -83,8 +89,17 @@ initDatabase()
     app.listen(PORT, '0.0.0.0', () => {
       console.log(`✅ Server running at http://0.0.0.0:${PORT}`);
       console.log(`   Frontend origin: ${FRONTEND_ORIGIN}`);
+
       const routeCount = app._router?.stack?.filter((l) => l.route).length || 0;
       console.log(`   Express 直接注册路由数：${routeCount}`);
+
+      /* ⭐ 启动钉钉定时同步 */
+      try {
+        startDingTalkSync();
+        console.log('   [DingTalkSync] 定时同步已启动');
+      } catch (e) {
+        console.error('   [DingTalkSync] 启动失败：', e.message);
+      }
     });
   })
   .catch((err) => {

@@ -230,6 +230,49 @@ async function ensureTables() {
       UNIQUE KEY uk_bus_month_staff (bus_id, month, staff_id),
       KEY idx_bus_month (bus_id, month)
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='薪酬计算-员工新人/排除状态'`,
+    
+    /* ⭐ 钉钉定时同步配置 */
+    `CREATE TABLE IF NOT EXISTS dingtalk_sync_config (
+      id                  INT          NOT NULL PRIMARY KEY DEFAULT 1,
+      enabled             TINYINT(1)   NOT NULL DEFAULT 1,
+      schedule_mode       VARCHAR(16)  NOT NULL DEFAULT 'daily',  -- daily / interval
+      daily_hour          INT          NOT NULL DEFAULT 3,        -- 0~23
+      interval_hours      INT          NOT NULL DEFAULT 6,        -- 1~24
+      lookback_days       INT          NOT NULL DEFAULT 30,
+      last_run_at         DATETIME     DEFAULT NULL,
+      last_run_status     VARCHAR(16)  DEFAULT NULL,              -- success / failed / running
+      last_run_message    VARCHAR(512) DEFAULT NULL,
+      updated_at          DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='钉钉定时同步配置'`,
+
+    `INSERT IGNORE INTO dingtalk_sync_config (id) VALUES (1)`,
+
+        /* ⭐ 钉钉流程缓存表 */
+    `CREATE TABLE IF NOT EXISTS dingtalk_process_cache (
+      process_instance_id VARCHAR(64)  NOT NULL PRIMARY KEY,
+      template_name       VARCHAR(128) DEFAULT NULL,
+      process_code        VARCHAR(64)  DEFAULT NULL,
+
+      title               VARCHAR(512) DEFAULT NULL,
+      status              VARCHAR(32)  DEFAULT NULL,
+      result              VARCHAR(32)  DEFAULT NULL,
+      create_time         DATETIME     DEFAULT NULL,
+      finish_time         DATETIME     DEFAULT NULL,
+
+      payment_unit        VARCHAR(255) DEFAULT NULL,
+      payee_account       VARCHAR(255) DEFAULT NULL,
+      amount              DECIMAL(12,2) DEFAULT NULL,
+
+      payload             JSON         DEFAULT NULL,
+
+      is_final            TINYINT(1)   NOT NULL DEFAULT 0,
+      last_synced_at      DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP,
+
+      KEY idx_template_time (process_code, create_time),
+      KEY idx_create_time   (create_time),
+      KEY idx_is_final      (is_final),
+      KEY idx_status        (status)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='钉钉审批流程本地缓存'`,
   ];
 
   for (const sql of sqls) {
