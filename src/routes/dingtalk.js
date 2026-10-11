@@ -224,13 +224,7 @@ function extractPaymentUnit(formValues) {
   keys.forEach((k) => {
     normalizedMap[norm(k)] = formValues[k];
   });
-  const candidates = [
-    '付款单位全称',
-    '付款单位',
-    '付款公司',
-    '付款主体',
-    '付款方',
-  ];
+  const candidates = ['付款单位全称', '付款单位', '付款公司', '付款主体', '付款方'];
   for (const c of candidates) {
     if (normalizedMap[c] !== undefined) return normalizedMap[c];
   }
@@ -442,11 +436,14 @@ router.get('/dingtalk/process-list', async (req, res) => {
 
 /* ============================================================
  * 路由 3：【核心】报告接口
+ *   ⭐ sync=0（默认）：只读缓存
+ *   ⭐ sync=1：同步未完成 → 写库 → 合并返回
  * ============================================================ */
 router.get('/dingtalk/report', async (req, res) => {
   const t0 = Date.now();
   try {
-    const { start, end, type, company, includeRaw } = req.query;
+    const { start, end, type, company, includeRaw, sync } = req.query;
+    const needSync = String(sync || '') === '1';
 
     if (!start || !end) {
       return res
@@ -456,17 +453,6 @@ router.get('/dingtalk/report', async (req, res) => {
 
     const startTs = parseDateTime(start, false);
     const endTs = parseDateTime(end, true);
-
-    const fmt = (ts) => {
-      const d = new Date(Number(ts) + 8 * 60 * 60 * 1000);
-      const p = (n) => String(n).padStart(2, '0');
-      return `${d.getUTCFullYear()}-${p(d.getUTCMonth() + 1)}-${p(
-        d.getUTCDate()
-      )} ${p(d.getUTCHours())}:${p(d.getUTCMinutes())}:${p(d.getUTCSeconds())}`;
-    };
-    console.log(
-      `[DingTalk][report] 时间范围（北京时间）：${fmt(startTs)} ~ ${fmt(endTs)}（原始参数：${start} ~ ${end}）`
-    );
 
     if (startTs >= endTs) {
       return res
@@ -481,14 +467,12 @@ router.get('/dingtalk/report', async (req, res) => {
         .json({ errorcode: 400, errormsg: '时间跨度不能超过 120 天' });
     }
 
+    /* 1) 模板过滤 */
     let templates = readTemplateCache();
-    console.log(`[DingTalk][report] 缓存模板数：${templates.length}`);
-
     const EXCLUDE_KEYWORDS = ['银行账户'];
     templates = templates.filter(
       (t) => t.name && !EXCLUDE_KEYWORDS.some((k) => t.name.includes(k))
     );
-    console.log(`[DingTalk][report] 排除[银行账户]后：${templates.length}`);
 
     if (type) {
       const keywords = String(type)
@@ -498,9 +482,6 @@ router.get('/dingtalk/report', async (req, res) => {
       if (keywords.length > 0) {
         templates = templates.filter(
           (t) => t.name && keywords.some((k) => t.name.includes(k))
-        );
-        console.log(
-          `[DingTalk][report] 类型过滤"${keywords.join(' / ')}" → 命中 ${templates.length} 个模板`
         );
       }
     }
@@ -513,6 +494,108 @@ router.get('/dingtalk/report', async (req, res) => {
       });
     }
 
+    /* ============================================================
+     * ⭐ 路径 A：只读缓存（sync=0）
+     * ============================================================ */
+    if (!needSync) {
+      const processCodes = templates.map((t) => t.processCode);
+      let cached = [];
+      try {
+        cached = await cache.getCachedAll(startTs, endTs, processCodes);
+        console.log(
+          `[DingTalk][report][cache] 只读缓存命中：${cached.length} 条`
+        );
+      } catch (e) {
+        console.error('[DingTalk][report][cache] 查缓存失败', e.message);
+      }
+
+      let filtered = cached;
+
+      if (company) {
+        const keyword = String(company).trim();
+        filtered = filtered.filter(
+          (d) => d.paymentUnit && d.paymentUnit.includes(keyword)
+        );
+      }
+
+      let autoAssignedCount = 0;
+      filtered = filtered.map((d) => {
+        const r = dingtalkSync.resolveMemberRefundPaymentUnit(
+          d.templateName,
+          d.formValues || {},
+          d.paymentUnit,
+          d.createTime
+        );
+        if (r.autoAssigned) autoAssignedCount++;
+        return {
+          ...d,
+          paymentUnit: r.paymentUnit,
+          _autoAssigned: r.autoAssigned,
+          _storeName: r.storeName,
+          _assignReason: r.reason,
+        };
+      });
+
+      const results = filtered.map((d) => {
+        const base = {
+          templateName: d.templateName,
+          processCode: d.processCode,
+          processInstanceId: d.processInstanceId,
+          title: d.title,
+          status: d.status,
+          result: d.result,
+          createTime: cache.normalizeDbTimeString(d.createTime) || '',
+          finishTime: cache.normalizeDbTimeString(d.finishTime) || '',
+          paymentUnit: d.paymentUnit,
+          payeeAccount: d.payeeAccount,
+          amount: d.amount,
+          items: d.items,
+          formValues: d.formValues,
+          operationRecords: d.operationRecords || [],
+          originatorName: d.originatorName || '',
+          pendingApprovers: d.pendingApprovers || [],
+          error: d.error,
+          _autoAssigned: d._autoAssigned === true,
+          _storeName: d._storeName || null,
+          _assignReason: d._assignReason || '',
+        };
+        if (includeRaw === '1') {
+          base.originatorUserId = d.originatorUserId;
+          base.originatorDeptId = d.originatorDeptId;
+        }
+        return base;
+      });
+
+      const cost = Date.now() - t0;
+      console.log(
+        `[DingTalk][report][cache] 完成：返回 ${results.length} 条，耗时 ${cost}ms`
+      );
+
+      return res.json({
+        errorcode: 0,
+        errormsg: '获取成功（缓存）',
+        data: {
+          source: 'cache',
+          startTime: startTs,
+          endTime: endTs,
+          filter: {
+            type: type || null,
+            company: company || null,
+            excludeTemplates: EXCLUDE_KEYWORDS,
+          },
+          totalTemplates: templates.length,
+          beforeFilterCount: cached.length,
+          totalCount: results.length,
+          autoAssignedCount,
+          costMs: cost,
+          results,
+        },
+      });
+    }
+
+    /* ============================================================
+     * ⭐ 路径 B：同步并查询（sync=1）
+     * ============================================================ */
     const templateResults = [];
     for (const tpl of templates) {
       try {
@@ -522,11 +605,11 @@ router.get('/dingtalk/report', async (req, res) => {
           endTs
         );
         templateResults.push({ ...tpl, instanceIds: ids });
-        console.log(`[DingTalk][report] ${tpl.name}: ${ids.length} 个实例`);
+        console.log(`[DingTalk][report][sync] ${tpl.name}: ${ids.length} 个实例`);
       } catch (e) {
         templateResults.push({ ...tpl, instanceIds: [], error: e.message });
         console.error(
-          `[DingTalk][report] ${tpl.name} 拉实例失败: ${e.message}`
+          `[DingTalk][report][sync] ${tpl.name} 拉实例失败: ${e.message}`
         );
       }
     }
@@ -537,10 +620,10 @@ router.get('/dingtalk/report', async (req, res) => {
     try {
       cachedFinals = await cache.getCachedFinals(startTs, endTs, processCodes);
       console.log(
-        `[DingTalk][report] 缓存命中（is_final=1）：${cachedFinals.length} 条`
+        `[DingTalk][report][sync] 缓存命中（is_final=1）：${cachedFinals.length} 条`
       );
     } catch (e) {
-      console.error('[DingTalk][report] 查缓存失败', e.message);
+      console.error('[DingTalk][report][sync] 查缓存失败', e.message);
     }
 
     const allInstanceIds = [];
@@ -554,7 +637,7 @@ router.get('/dingtalk/report', async (req, res) => {
     const needFetchIds = allInstanceIds.filter((id) => !finalIds.has(id));
 
     console.log(
-      `[DingTalk][report] 需从钉钉拉取：${needFetchIds.length} / ${allInstanceIds.length}（缓存跳过 ${finalIds.size}）`
+      `[DingTalk][report][sync] 需从钉钉拉取：${needFetchIds.length} / ${allInstanceIds.length}`
     );
 
     const idToTpl = new Map();
@@ -591,11 +674,10 @@ router.get('/dingtalk/report', async (req, res) => {
       }
     }
 
-    /* 3.7 写缓存 */
+    /* 写缓存（含未完成） */
     try {
       const valid = freshDetails.filter((d) => !d.error);
 
-      /* ⭐ 写缓存前先按门店归属，保证缓存里就是归属后的 payment_unit */
       valid.forEach((d) => {
         const r = dingtalkSync.resolveMemberRefundPaymentUnit(
           d.templateName,
@@ -633,13 +715,12 @@ router.get('/dingtalk/report', async (req, res) => {
       }
 
       console.log(
-        `[DingTalk][report] 写入缓存：${valid.length} 条（${groupMap.size} 个分组）`
+        `[DingTalk][report][sync] 写入缓存：${valid.length} 条（${groupMap.size} 个分组）`
       );
     } catch (e) {
-      console.error('[DingTalk][report] 写缓存失败', e.message);
+      console.error('[DingTalk][report][sync] 写缓存失败', e.message);
     }
 
-    /* 3.8 合并 */
     let filtered = [...cachedFinals, ...freshDetails];
 
     if (company) {
@@ -647,12 +728,8 @@ router.get('/dingtalk/report', async (req, res) => {
       filtered = filtered.filter(
         (d) => d.paymentUnit && d.paymentUnit.includes(keyword)
       );
-      console.log(
-        `[DingTalk][report] 付款单位过滤"${keyword}"：${cachedFinals.length + freshDetails.length} → ${filtered.length}`
-      );
     }
 
-    /* ⭐ 4.5 会员退费门店归属（兜底旧缓存） */
     let autoAssignedCount = 0;
     filtered = filtered.map((d) => {
       const r = dingtalkSync.resolveMemberRefundPaymentUnit(
@@ -670,11 +747,7 @@ router.get('/dingtalk/report', async (req, res) => {
         _assignReason: r.reason,
       };
     });
-    console.log(
-      `[DingTalk][report] 门店自动归属：${autoAssignedCount} 条 / 共 ${filtered.length} 条`
-    );
 
-    /* 5) 整理返回结构 */
     const results = filtered.map((d) => {
       const base = {
         templateName: d.templateName,
@@ -694,7 +767,6 @@ router.get('/dingtalk/report', async (req, res) => {
         originatorName: d.originatorName || '',
         pendingApprovers: d.pendingApprovers || [],
         error: d.error,
-        // ⭐ 门店归属标记
         _autoAssigned: d._autoAssigned === true,
         _storeName: d._storeName || null,
         _assignReason: d._assignReason || '',
@@ -708,13 +780,14 @@ router.get('/dingtalk/report', async (req, res) => {
 
     const cost = Date.now() - t0;
     console.log(
-      `[DingTalk][report] 完成：模板 ${templates.length} 个，返回 ${results.length} 条，门店归属 ${autoAssignedCount} 条，耗时 ${cost}ms`
+      `[DingTalk][report][sync] 完成：返回 ${results.length} 条，耗时 ${cost}ms`
     );
 
     res.json({
       errorcode: 0,
-      errormsg: '获取成功',
+      errormsg: '获取成功（同步）',
       data: {
+        source: 'dingtalk+sync',
         startTime: startTs,
         endTime: endTs,
         filter: {

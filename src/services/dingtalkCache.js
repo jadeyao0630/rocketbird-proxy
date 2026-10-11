@@ -15,7 +15,6 @@ const BJ_FORMATTER = new Intl.DateTimeFormat('en-CA', {
   hour12: false,
 });
 
-/** 毫秒时间戳 → "YYYY-MM-DD HH:mm:ss"（北京时间） */
 function tsToLocalString(ts) {
   if (ts === null || ts === undefined) return null;
   const d = new Date(Number(ts));
@@ -27,7 +26,6 @@ function tsToLocalString(ts) {
   )}:${get('second')}`;
 }
 
-/** 任意时间输入 → "YYYY-MM-DD HH:mm:ss"（北京时间） */
 function normalizeDbTimeString(v) {
   if (!v) return null;
   if (v instanceof Date) return tsToLocalString(v.getTime());
@@ -35,25 +33,21 @@ function normalizeDbTimeString(v) {
   const s = String(v).trim().replace(/\//g, '-');
   if (!s) return null;
 
-  // 已经是标准格式，直接返回
   if (/^\d{4}-\d{2}-\d{2}$/.test(s)) return `${s} 00:00:00`;
   if (/^\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}$/.test(s)) return `${s}:00`;
   if (/^\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}:\d{2}$/.test(s)) return s;
 
-  // ⭐ 处理 ISO 8601 带时区格式，如 "2026-09-08T03:39:07.000Z"
   if (/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d+)?Z?$/.test(s)) {
     const d = new Date(s);
     if (isNaN(d.getTime())) return null;
     return tsToLocalString(d.getTime());
   }
 
-  // 其它格式：按北京时间解析
   const d = new Date(s.replace(' ', 'T') + '+08:00');
   if (isNaN(d.getTime())) return null;
   return tsToLocalString(d.getTime());
 }
 
-/** 判断是否终态 */
 function isFinalStatus(status) {
   if (status === null || status === undefined) return false;
   const v = String(status).trim().toUpperCase();
@@ -85,7 +79,6 @@ function rowToItem(row) {
     title: row.title,
     status: row.status,
     result: row.result,
-    // ⭐ 统一格式化为 "YYYY-MM-DD HH:mm:ss"
     createTime: normalizeDbTimeString(row.create_time) || '',
     finishTime: normalizeDbTimeString(row.finish_time) || undefined,
     paymentUnit: row.payment_unit,
@@ -123,7 +116,6 @@ async function getCachedFinals(startTs, endTs, processCodes) {
 
   if (Array.isArray(processCodes) && processCodes.length > 0) {
     const placeholders = processCodes.map(() => '?').join(',');
-    /* ⭐ 兼容旧数据：process_code 为 NULL 的也算 */
     sql += ` AND (process_code IN (${placeholders}) OR process_code IS NULL)`;
     params.push(...processCodes);
   }
@@ -131,6 +123,38 @@ async function getCachedFinals(startTs, endTs, processCodes) {
   const [rows] = await pool.query(sql, params);
   console.log(
     `[dingtalkCache] getCachedFinals 范围 ${startStr} ~ ${endStr}，命中 ${rows.length} 条`
+  );
+  return rows.map(rowToItem);
+}
+
+/* ============================================================
+ * ⭐ 从缓存读「全部状态」（含审批中/未完成），仅查库不打钉钉
+ * ============================================================ */
+async function getCachedAll(startTs, endTs, processCodes) {
+  if (!startTs || !endTs) return [];
+
+  const startStr = tsToLocalString(startTs);
+  const endStr = tsToLocalString(endTs);
+  if (!startStr || !endStr) return [];
+
+  let sql = `
+    SELECT process_instance_id, template_name, process_code,
+           title, status, result, create_time, finish_time,
+           payment_unit, payee_account, amount, payload, is_final
+      FROM dingtalk_process_cache
+     WHERE create_time BETWEEN ? AND ?
+  `;
+  const params = [startStr, endStr];
+
+  if (Array.isArray(processCodes) && processCodes.length > 0) {
+    const placeholders = processCodes.map(() => '?').join(',');
+    sql += ` AND (process_code IN (${placeholders}) OR process_code IS NULL)`;
+    params.push(...processCodes);
+  }
+
+  const [rows] = await pool.query(sql, params);
+  console.log(
+    `[dingtalkCache] getCachedAll 范围 ${startStr} ~ ${endStr}，命中 ${rows.length} 条`
   );
   return rows.map(rowToItem);
 }
@@ -189,7 +213,6 @@ async function upsertMany(items, templateName, processCode) {
       const createTime = normalizeDbTimeString(it.createTime);
       const finishTime = normalizeDbTimeString(it.finishTime);
 
-      /* ⭐ 三个字段都优先用 item 自带的，再看参数，最后 null */
       const finalTemplateName = it.templateName || templateName || null;
       const finalProcessCode = it.processCode || processCode || null;
 
@@ -246,6 +269,7 @@ async function upsertMany(items, templateName, processCode) {
 
 module.exports = {
   getCachedFinals,
+  getCachedAll,
   getFinalIds,
   upsertMany,
   tsToLocalString,
