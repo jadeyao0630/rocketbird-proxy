@@ -16,7 +16,15 @@ const adminAuthRoutes = require('./routes/adminAuth');
 const cardRoutes = require('./routes/card');
 const adminPermissionsRoutes = require('./routes/adminPermissions');
 const payrollStatusRoutes = require('./routes/payrollStatus');
-const dingtalkRoutes = require('./routes/dingtalk');          // ⭐ 新增
+const dingtalkRoutes = require('./routes/dingtalk');
+const aiRoutes = require('./routes/ai');
+const monthlySummaryRoutes = require('./routes/monthlySummary');
+
+console.log('[boot] 路由模块加载情况：');
+console.log('  authRoutes           :', typeof authRoutes, authRoutes?.stack?.length);
+console.log('  dingtalkRoutes       :', typeof dingtalkRoutes, dingtalkRoutes?.stack?.length);
+console.log('  aiRoutes             :', typeof aiRoutes, aiRoutes?.stack?.length);
+console.log('  monthlySummaryRoutes :', typeof monthlySummaryRoutes, monthlySummaryRoutes?.stack?.length);
 
 const app = express();
 
@@ -27,8 +35,10 @@ app.use(
     optionsSuccessStatus: 200,
   })
 );
-app.use(bodyParser.urlencoded({ extended: true }));
-app.use(bodyParser.json());
+
+/* ⭐ 放宽 body 限制，避免 413 Payload Too Large */
+app.use(bodyParser.urlencoded({ extended: true, limit: '50mb' }));
+app.use(bodyParser.json({ limit: '50mb' }));
 app.use(cookieParser());
 
 /* 日志 */
@@ -53,7 +63,9 @@ app.use('/api', adminAuthRoutes);
 app.use('/api', cardRoutes);
 app.use('/api', adminPermissionsRoutes);
 app.use('/api', payrollStatusRoutes);
-app.use('/api', dingtalkRoutes);                              // ⭐ 新增
+app.use('/api', dingtalkRoutes);
+app.use('/api', aiRoutes);
+app.use('/api', monthlySummaryRoutes);
 
 /* 健康检查 */
 app.get('/health', (req, res) => {
@@ -62,6 +74,7 @@ app.get('/health', (req, res) => {
 
 /* 404 */
 app.use((req, res) => {
+  console.log('[404] 未匹配任何路由：', req.method, req.originalUrl);
   res.status(404).json({ error: 'Not Found', path: req.originalUrl });
 });
 
@@ -70,6 +83,8 @@ initDatabase()
     app.listen(PORT, '0.0.0.0', () => {
       console.log(`✅ Server running at http://0.0.0.0:${PORT}`);
       console.log(`   Frontend origin: ${FRONTEND_ORIGIN}`);
+      const routeCount = app._router?.stack?.filter((l) => l.route).length || 0;
+      console.log(`   Express 直接注册路由数：${routeCount}`);
     });
   })
   .catch((err) => {

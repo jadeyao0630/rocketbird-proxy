@@ -14,7 +14,7 @@ if (!DINGTALK_APP_KEY || !DINGTALK_APP_SECRET) {
 }
 
 /* ============================================================
- * ⭐ 模板缓存：本地 JSON 文件
+ * 模板缓存
  * ============================================================ */
 const TEMPLATE_CACHE_FILE = path.join(__dirname, '..', 'data', 'dingtalk_templates.json');
 
@@ -99,9 +99,81 @@ async function getAccessToken() {
 }
 
 /* ============================================================
- * ⭐ 日期字符串 → 毫秒时间戳
- *    - start: 默认补 00:00:00
- *    - end:   传 true 时补 23:59:59（避免漏掉当天）
+ * 用户 ID → 姓名 缓存
+ * ============================================================ */
+const userNameCache = new Map();
+
+async function fetchUserName(userId) {
+  if (!userId) return '';
+  if (userNameCache.has(userId)) return userNameCache.get(userId);
+
+  /* 长 ID（>30 位）大概率是外部人，不查 */
+  if (String(userId).length > 30) {
+    userNameCache.set(userId, '');
+    return '';
+  }
+
+  try {
+    const accessToken = await getAccessToken();
+    const url = `https://oapi.dingtalk.com/topapi/v2/user/get?access_token=${accessToken}`;
+    const response = await axios.post(url, { userid: userId });
+    const data = response.data;
+
+    if (data.errcode === 0 && data.result?.name) {
+      const name = data.result.name;
+      userNameCache.set(userId, name);
+      return name;
+    }
+    userNameCache.set(userId, '');
+    return '';
+  } catch (e) {
+    userNameCache.set(userId, '');
+    return '';
+  }
+}
+
+async function enrichOperationRecords(records) {
+  if (!Array.isArray(records) || records.length === 0) return records;
+
+  const uniqueIds = Array.from(
+    new Set(records.map((r) => r.userId).filter(Boolean))
+  );
+
+  const nameMap = new Map();
+  await Promise.all(
+    uniqueIds.map(async (id) => {
+      const name = await fetchUserName(id);
+      nameMap.set(id, name);
+    })
+  );
+
+  return records.map((r) => ({
+    ...r,
+    userName: nameMap.get(r.userId) || '',
+  }));
+}
+
+async function extractPendingApprovers(tasks) {
+  if (!Array.isArray(tasks) || tasks.length === 0) return [];
+
+  const running = tasks.filter(
+    (t) => String(t.task_status || '').toUpperCase() === 'RUNNING'
+  );
+
+  const result = [];
+  const seen = new Set();
+  for (const t of running) {
+    const uid = t.userid || '';
+    if (!uid || seen.has(uid)) continue;
+    seen.add(uid);
+    const name = await fetchUserName(uid);
+    result.push({ userId: uid, userName: name });
+  }
+  return result;
+}
+
+/* ============================================================
+ * 日期字符串 → 毫秒时间戳
  * ============================================================ */
 function parseDateTime(str, isEnd = false) {
   if (!str) return null;
@@ -116,7 +188,6 @@ function parseDateTime(str, isEnd = false) {
   return d.getTime();
 }
 
-/* 分页拉取单个 processCode 的实例 ID（新版接口，token 走 Header） */
 async function fetchProcessInstanceIds(processCode, startTime, endTime) {
   const accessToken = await getAccessToken();
   const allIds = [];
@@ -142,7 +213,6 @@ async function fetchProcessInstanceIds(processCode, startTime, endTime) {
   return allIds;
 }
 
-/* 从 formValues 中提取"付款单位" */
 function extractPaymentUnit(formValues) {
   const keys = Object.keys(formValues);
   const norm = (k) => String(k).replace(/[\s\t]+/g, '');
@@ -160,7 +230,6 @@ function extractPaymentUnit(formValues) {
   return fuzzy ? formValues[fuzzy] : null;
 }
 
-/* 从 formValues 中提取"收款账户" */
 function extractPayeeAccount(formValues) {
   const keys = Object.keys(formValues);
   const norm = (k) => String(k).replace(/[\s\t]+/g, '');
@@ -173,7 +242,6 @@ function extractPayeeAccount(formValues) {
   return null;
 }
 
-/* 解析"明细列表" */
 function parseDetailList(formValues) {
   const raw = formValues['明细列表'];
   if (!raw || raw === 'null') return [];
@@ -194,7 +262,6 @@ function parseDetailList(formValues) {
   }
 }
 
-/* 智能提取金额 */
 function extractAmount(formValues) {
   const norm = (k) => String(k).replace(/[\s\t]+/g, '');
   const normalizedMap = {};
@@ -217,7 +284,6 @@ function extractAmount(formValues) {
   return null;
 }
 
-/* 获取单个实例详情 */
 async function fetchInstanceDetail(instanceId) {
   const accessToken = await getAccessToken();
   const url = `https://oapi.dingtalk.com/topapi/processinstance/get?access_token=${accessToken}`;
@@ -231,6 +297,17 @@ async function fetchInstanceDetail(instanceId) {
   (inst.form_component_values || []).forEach((item) => {
     formValues[item.name] = item.value;
   });
+
+  const rawRecords = (inst.operation_records || []).map((rec) => ({
+    userId: rec.userid || '',
+    type: rec.type || '',
+    result: rec.result || '',
+    date: rec.date || null,
+    remark: rec.remark || '',
+  }));
+
+  const operationRecords = await enrichOperationRecords(rawRecords);
+  const pendingApprovers = await extractPendingApprovers(inst.tasks || []);
 
   return {
     processInstanceId: instanceId,
@@ -246,29 +323,14 @@ async function fetchInstanceDetail(instanceId) {
     amount: extractAmount(formValues),
     items: parseDetailList(formValues),
     formValues,
+    operationRecords,
+    originatorName: inst.originator_name || '',
+    pendingApprovers,
   };
 }
 
-/* 从钉钉拉取模板（供"更新"接口调用） */
-async function fetchTemplatesFromDingTalk() {
-  const accessToken = await getAccessToken();
-  const url = `https://oapi.dingtalk.com/topapi/process/listbyuserid?access_token=${accessToken}`;
-  const response = await axios.post(url, { offset: 0, size: 100 });
-  const data = response.data;
-
-  console.log('========== [DingTalk] 模板接口原始返回 ==========');
-  console.log(JSON.stringify(data, null, 2));
-  console.log('===============================================');
-
-  if (data.errcode !== 0) throw new Error(`获取模板失败：${data.errmsg}`);
-  return (data.result?.process_list || []).map((t) => ({
-    name: t.name,
-    processCode: t.process_code,
-  }));
-}
-
 /* ============================================================
- * 路由 1：获取所有审批模板（读本地缓存，不调钉钉）
+ * 路由 1：获取所有审批模板
  * ============================================================ */
 router.get('/dingtalk/templates', async (req, res) => {
   try {
@@ -286,7 +348,6 @@ router.get('/dingtalk/templates', async (req, res) => {
 
 /* ============================================================
  * 路由 1.5：手动更新模板
- * POST /api/dingtalk/templates/refresh
  * ============================================================ */
 router.post('/dingtalk/templates/refresh', async (req, res) => {
   try {
@@ -296,15 +357,8 @@ router.post('/dingtalk/templates/refresh', async (req, res) => {
     const response = await axios.post(url, { offset: 0, size: 100 });
     const raw = response.data;
 
-    console.log('========== [DingTalk] 刷新 · 原始返回 ==========');
-    console.log(JSON.stringify(raw, null, 2));
-    console.log('============================================');
-
     if (raw.errcode !== 0) {
-      return res.status(500).json({
-        errorcode: raw.errcode,
-        errormsg: raw.errmsg,
-      });
+      return res.status(500).json({ errorcode: raw.errcode, errormsg: raw.errmsg });
     }
 
     const templates = (raw.result?.process_list || []).map((t) => ({
@@ -317,12 +371,7 @@ router.post('/dingtalk/templates/refresh', async (req, res) => {
     res.json({
       errorcode: 0,
       errormsg: '更新成功',
-      data: {
-        count: templates.length,
-        templates,
-        source: 'dingtalk',
-        raw,
-      },
+      data: { count: templates.length, templates, source: 'dingtalk' },
     });
   } catch (error) {
     console.error('[DingTalk] 更新模板失败:', error.message);
@@ -330,29 +379,6 @@ router.post('/dingtalk/templates/refresh', async (req, res) => {
       errorcode: 500,
       errormsg: error.response?.data?.errmsg || error.message || '更新失败',
     });
-  }
-});
-
-/* ============================================================
- * 路由 1.6：调试接口 - 返回原始模板数据
- * GET /api/dingtalk/templates/raw
- * ============================================================ */
-router.get('/dingtalk/templates/raw', async (req, res) => {
-  try {
-    console.log('[DingTalk] 拉取原始模板数据…');
-    const accessToken = await getAccessToken();
-    const url = `https://oapi.dingtalk.com/topapi/process/listbyuserid?access_token=${accessToken}`;
-    const response = await axios.post(url, { offset: 0, size: 100 });
-    const data = response.data;
-
-    console.log('========== [DingTalk] 原始返回 ==========');
-    console.log(JSON.stringify(data, null, 2));
-    console.log('======================================');
-
-    res.json({ errorcode: 0, errormsg: '获取成功', data });
-  } catch (error) {
-    console.error('[DingTalk] 拉原始数据失败:', error.message);
-    res.status(500).json({ errorcode: 500, errormsg: error.message });
   }
 });
 
@@ -365,7 +391,6 @@ router.get('/dingtalk/process-list', async (req, res) => {
     if (!start || !end) return res.status(400).json({ errorcode: 400, errormsg: '缺少 start / end' });
     if (!processCode) return res.status(400).json({ errorcode: 400, errormsg: '缺少 processCode' });
 
-    /* ⭐ end 补 23:59:59 */
     const startTs = parseDateTime(start, false);
     const endTs = parseDateTime(end, true);
     if (startTs >= endTs) return res.status(400).json({ errorcode: 400, errormsg: 'start 必须早于 end' });
@@ -397,7 +422,6 @@ router.get('/dingtalk/report', async (req, res) => {
       return res.status(400).json({ errorcode: 400, errormsg: '缺少 start / end' });
     }
 
-    /* ⭐ end 补 23:59:59 */
     const startTs = parseDateTime(start, false);
     const endTs = parseDateTime(end, true);
     if (startTs >= endTs) return res.status(400).json({ errorcode: 400, errormsg: 'start 必须早于 end' });
@@ -407,11 +431,9 @@ router.get('/dingtalk/report', async (req, res) => {
       return res.status(400).json({ errorcode: 400, errormsg: '时间跨度不能超过 120 天' });
     }
 
-    /* 1) 从本地缓存读模板 */
     let templates = readTemplateCache();
     console.log(`[DingTalk][report] 缓存模板数：${templates.length}`);
 
-    /* 2) 排除黑名单 + type 关键词过滤 */
     const EXCLUDE_KEYWORDS = ['银行账户'];
     templates = templates.filter(
       (t) => t.name && !EXCLUDE_KEYWORDS.some((k) => t.name.includes(k))
@@ -442,7 +464,7 @@ router.get('/dingtalk/report', async (req, res) => {
       });
     }
 
-    /* 3) 逐个模板拉实例 ID */
+    /* 1) 拉实例 ID */
     const templateResults = [];
     for (const tpl of templates) {
       try {
@@ -455,10 +477,15 @@ router.get('/dingtalk/report', async (req, res) => {
       }
     }
 
-    /* 4) 逐个实例拉详情 */
+    /* ============================================================
+     * ⭐ 2) 串行拉实例详情 + 节流（避免触发钉钉 QPS 限流 20/秒）
+     * ============================================================ */
     const allDetails = [];
+    const FLOW_INTERVAL_MS = 100; // 100ms/次 = 10 QPS，安全
+
     for (const tr of templateResults) {
       for (const id of tr.instanceIds) {
+        const started = Date.now();
         try {
           const detail = await fetchInstanceDetail(id);
           allDetails.push({
@@ -474,10 +501,15 @@ router.get('/dingtalk/report', async (req, res) => {
             error: e.message,
           });
         }
+        /* ⭐ 控制速率 */
+        const elapsed = Date.now() - started;
+        if (elapsed < FLOW_INTERVAL_MS) {
+          await new Promise((r) => setTimeout(r, FLOW_INTERVAL_MS - elapsed));
+        }
       }
     }
 
-    /* 5) 按付款单位过滤 */
+    /* 3) 按付款单位过滤 */
     let filtered = allDetails;
     if (company) {
       const keyword = String(company).trim();
@@ -489,19 +521,32 @@ router.get('/dingtalk/report', async (req, res) => {
       );
     }
 
-    /* 6) 默认只保留"已完成且同意" */
+    /* 4) 按「只看已通过」过滤 */
     const onlyApproved = req.query.onlyApproved !== '0';
+    console.log(
+      `[DingTalk][report] onlyApproved = ${onlyApproved}（原始值：${JSON.stringify(req.query.onlyApproved)}）`
+    );
+
     if (onlyApproved) {
       const before = filtered.length;
+      const isCompleted = (s) => String(s || '').toUpperCase() === 'COMPLETED';
+      const isAgreed = (r) => {
+        const v = String(r || '').toLowerCase();
+        return v === 'agree' || v === 'approved' || v === 'pass';
+      };
       filtered = filtered.filter(
-        (d) => d.status === 'COMPLETED' && d.result === 'agree'
+        (d) => isCompleted(d.status) && isAgreed(d.result)
       );
       console.log(
-        `[DingTalk][report] 只保留 COMPLETED+agree：${before} → ${filtered.length}`
+        `[DingTalk][report] 只保留已通过：${before} → ${filtered.length}`
+      );
+    } else {
+      console.log(
+        `[DingTalk][report] 不过滤状态，返回全部 ${filtered.length} 条`
       );
     }
 
-    /* 7) 整理返回结构 */
+    /* 5) 整理返回结构 */
     const results = filtered.map((d) => {
       const base = {
         templateName: d.templateName,
@@ -517,6 +562,9 @@ router.get('/dingtalk/report', async (req, res) => {
         amount: d.amount,
         items: d.items,
         formValues: d.formValues,
+        operationRecords: d.operationRecords || [],
+        originatorName: d.originatorName || '',
+        pendingApprovers: d.pendingApprovers || [],
         error: d.error,
       };
       if (includeRaw === '1') {
@@ -585,12 +633,18 @@ router.post('/dingtalk/instances-detail', async (req, res) => {
     }
 
     const results = [];
+    const FLOW_INTERVAL_MS = 100;
     for (const id of instanceIds) {
+      const started = Date.now();
       try {
         const detail = await fetchInstanceDetail(id);
         results.push(detail);
       } catch (e) {
         results.push({ processInstanceId: id, error: e.message });
+      }
+      const elapsed = Date.now() - started;
+      if (elapsed < FLOW_INTERVAL_MS) {
+        await new Promise((r) => setTimeout(r, FLOW_INTERVAL_MS - elapsed));
       }
     }
 
