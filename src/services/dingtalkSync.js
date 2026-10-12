@@ -12,13 +12,8 @@ let running = false;
 
 /* ============================================================
  * ⭐ 会员退费：门店 → 第一家公司 映射
- *    请把下面的示例替换为真实数据
  * ============================================================ */
 const STORE_COMPANY_MAP = {
-  // 示例：
-  // '朝阳门店': '北京朝阳体育文化有限公司',
-  // '海淀门店': '北京海淀体育文化有限公司',
-  // '丰台门店': '北京丰台体育文化有限公司',
   '富贵园店': '北京林朗韵动体育管理有限公司',
   '哈德门店': '北京林朗悦动体育管理有限公司',
 };
@@ -102,8 +97,6 @@ function mapStoreToCompany(storeName) {
 /**
  * ⭐ 会员退费：按门店字段重算 paymentUnit
  *    返回 { paymentUnit, autoAssigned, storeName, reason }
- *    - autoAssigned=true 时，前端会打「门店归属」徽标
- *    - reason 便于排查：no-template / before-effective / no-store-field / no-mapping / ok
  */
 function resolveMemberRefundPaymentUnit(
   templateName,
@@ -207,6 +200,33 @@ async function markRun(status, message) {
       WHERE id = 1`,
     [nowStr, status, message ? String(message).slice(0, 500) : null]
   );
+}
+
+/**
+ * ⭐ 清理上次进程被杀 / 崩溃时残留的 running 状态
+ *    在 startDingTalkSync 时调用一次即可
+ */
+async function resetStaleRunningState() {
+  try {
+    const [rows] = await pool.query(
+      `SELECT last_run_status FROM dingtalk_sync_config WHERE id = 1 LIMIT 1`
+    );
+    const status = rows?.[0]?.last_run_status;
+    if (status === 'running') {
+      await pool.query(
+        `UPDATE dingtalk_sync_config
+            SET last_run_status = 'failed',
+                last_run_message = CONCAT(
+                  IFNULL(last_run_message, ''),
+                  ' [服务重启，上次同步未正常结束]'
+                )
+          WHERE id = 1`
+      );
+      console.log('[DingTalkSync] 检测到残留 running 状态，已重置为 failed');
+    }
+  } catch (e) {
+    console.warn('[DingTalkSync] resetStaleRunningState 失败', e.message);
+  }
 }
 
 /* ============================================================
@@ -384,7 +404,6 @@ async function runSyncOnce(trigger = 'auto') {
         try {
           const detail = await fetchDetail(id, accessToken);
           if (detail) {
-            // ⭐ 门店归属
             const r = resolveMemberRefundPaymentUnit(
               tpl.name,
               detail.formValues,
@@ -393,7 +412,6 @@ async function runSyncOnce(trigger = 'auto') {
             );
             if (r.autoAssigned) totalAutoAssigned++;
 
-            // ⭐ 旁路标记写入 formValues（不污染原始字段，前端可读）
             if (tpl.name === MEMBER_REFUND_TEMPLATE) {
               detail.formValues = {
                 ...detail.formValues,
@@ -496,6 +514,9 @@ async function restartSchedule() {
 }
 
 function startDingTalkSync() {
+  /* ⭐ 先清理残留 running 状态，避免面板一直转圈 */
+  resetStaleRunningState();
+
   setTimeout(async () => {
     try {
       const cfg = await getConfig();
@@ -515,6 +536,8 @@ module.exports = {
   runSyncOnce,
   getConfig,
   updateConfig,
+  markRun,
+  resetStaleRunningState,
   resolveMemberRefundPaymentUnit,
   extractStoreName,
   mapStoreToCompany,

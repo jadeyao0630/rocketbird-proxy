@@ -435,9 +435,7 @@ router.get('/dingtalk/process-list', async (req, res) => {
 });
 
 /* ============================================================
- * 路由 3：【核心】报告接口
- *   ⭐ sync=0（默认）：只读缓存
- *   ⭐ sync=1：同步未完成 → 写库 → 合并返回
+ * 路由 3：报告接口（带 sync）
  * ============================================================ */
 router.get('/dingtalk/report', async (req, res) => {
   const t0 = Date.now();
@@ -467,7 +465,6 @@ router.get('/dingtalk/report', async (req, res) => {
         .json({ errorcode: 400, errormsg: '时间跨度不能超过 120 天' });
     }
 
-    /* 1) 模板过滤 */
     let templates = readTemplateCache();
     const EXCLUDE_KEYWORDS = ['银行账户'];
     templates = templates.filter(
@@ -494,23 +491,17 @@ router.get('/dingtalk/report', async (req, res) => {
       });
     }
 
-    /* ============================================================
-     * ⭐ 路径 A：只读缓存（sync=0）
-     * ============================================================ */
+    /* 路径 A：只读缓存 */
     if (!needSync) {
       const processCodes = templates.map((t) => t.processCode);
       let cached = [];
       try {
         cached = await cache.getCachedAll(startTs, endTs, processCodes);
-        console.log(
-          `[DingTalk][report][cache] 只读缓存命中：${cached.length} 条`
-        );
       } catch (e) {
         console.error('[DingTalk][report][cache] 查缓存失败', e.message);
       }
 
       let filtered = cached;
-
       if (company) {
         const keyword = String(company).trim();
         filtered = filtered.filter(
@@ -536,220 +527,7 @@ router.get('/dingtalk/report', async (req, res) => {
         };
       });
 
-      const results = filtered.map((d) => {
-        const base = {
-          templateName: d.templateName,
-          processCode: d.processCode,
-          processInstanceId: d.processInstanceId,
-          title: d.title,
-          status: d.status,
-          result: d.result,
-          createTime: cache.normalizeDbTimeString(d.createTime) || '',
-          finishTime: cache.normalizeDbTimeString(d.finishTime) || '',
-          paymentUnit: d.paymentUnit,
-          payeeAccount: d.payeeAccount,
-          amount: d.amount,
-          items: d.items,
-          formValues: d.formValues,
-          operationRecords: d.operationRecords || [],
-          originatorName: d.originatorName || '',
-          pendingApprovers: d.pendingApprovers || [],
-          error: d.error,
-          _autoAssigned: d._autoAssigned === true,
-          _storeName: d._storeName || null,
-          _assignReason: d._assignReason || '',
-        };
-        if (includeRaw === '1') {
-          base.originatorUserId = d.originatorUserId;
-          base.originatorDeptId = d.originatorDeptId;
-        }
-        return base;
-      });
-
-      const cost = Date.now() - t0;
-      console.log(
-        `[DingTalk][report][cache] 完成：返回 ${results.length} 条，耗时 ${cost}ms`
-      );
-
-      return res.json({
-        errorcode: 0,
-        errormsg: '获取成功（缓存）',
-        data: {
-          source: 'cache',
-          startTime: startTs,
-          endTime: endTs,
-          filter: {
-            type: type || null,
-            company: company || null,
-            excludeTemplates: EXCLUDE_KEYWORDS,
-          },
-          totalTemplates: templates.length,
-          beforeFilterCount: cached.length,
-          totalCount: results.length,
-          autoAssignedCount,
-          costMs: cost,
-          results,
-        },
-      });
-    }
-
-    /* ============================================================
-     * ⭐ 路径 B：同步并查询（sync=1）
-     * ============================================================ */
-    const templateResults = [];
-    for (const tpl of templates) {
-      try {
-        const ids = await fetchProcessInstanceIds(
-          tpl.processCode,
-          startTs,
-          endTs
-        );
-        templateResults.push({ ...tpl, instanceIds: ids });
-        console.log(`[DingTalk][report][sync] ${tpl.name}: ${ids.length} 个实例`);
-      } catch (e) {
-        templateResults.push({ ...tpl, instanceIds: [], error: e.message });
-        console.error(
-          `[DingTalk][report][sync] ${tpl.name} 拉实例失败: ${e.message}`
-        );
-      }
-    }
-
-    const processCodes = templateResults.map((t) => t.processCode);
-
-    let cachedFinals = [];
-    try {
-      cachedFinals = await cache.getCachedFinals(startTs, endTs, processCodes);
-      console.log(
-        `[DingTalk][report][sync] 缓存命中（is_final=1）：${cachedFinals.length} 条`
-      );
-    } catch (e) {
-      console.error('[DingTalk][report][sync] 查缓存失败', e.message);
-    }
-
-    const allInstanceIds = [];
-    templateResults.forEach((tr) => {
-      tr.instanceIds.forEach((id) => allInstanceIds.push(id));
-    });
-
-    const finalIds = await cache
-      .getFinalIds(allInstanceIds)
-      .catch(() => new Set());
-    const needFetchIds = allInstanceIds.filter((id) => !finalIds.has(id));
-
-    console.log(
-      `[DingTalk][report][sync] 需从钉钉拉取：${needFetchIds.length} / ${allInstanceIds.length}`
-    );
-
-    const idToTpl = new Map();
-    templateResults.forEach((tr) => {
-      tr.instanceIds.forEach((id) => {
-        idToTpl.set(id, { name: tr.name, code: tr.processCode });
-      });
-    });
-
-    const freshDetails = [];
-    const FLOW_INTERVAL_MS = 100;
-
-    for (const id of needFetchIds) {
-      const started = Date.now();
-      const tpl = idToTpl.get(id) || {};
-      try {
-        const detail = await fetchInstanceDetail(id);
-        freshDetails.push({
-          templateName: tpl.name,
-          processCode: tpl.code,
-          ...detail,
-        });
-      } catch (e) {
-        freshDetails.push({
-          templateName: tpl.name,
-          processCode: tpl.code,
-          processInstanceId: id,
-          error: e.message,
-        });
-      }
-      const elapsed = Date.now() - started;
-      if (elapsed < FLOW_INTERVAL_MS) {
-        await new Promise((r) => setTimeout(r, FLOW_INTERVAL_MS - elapsed));
-      }
-    }
-
-    /* 写缓存（含未完成） */
-    try {
-      const valid = freshDetails.filter((d) => !d.error);
-
-      valid.forEach((d) => {
-        const r = dingtalkSync.resolveMemberRefundPaymentUnit(
-          d.templateName,
-          d.formValues || {},
-          d.paymentUnit,
-          d.createTime
-        );
-        d.paymentUnit = r.paymentUnit;
-        if (d.templateName === dingtalkSync.MEMBER_REFUND_TEMPLATE) {
-          d.formValues = {
-            ...(d.formValues || {}),
-            __autoAssigned: r.autoAssigned ? '1' : '0',
-            __storeName: r.storeName || '',
-            __assignReason: r.reason || '',
-          };
-        }
-      });
-
-      const groupMap = new Map();
-      valid.forEach((d) => {
-        const key = `${d.templateName || ''}||${d.processCode || ''}`;
-        if (!groupMap.has(key)) {
-          groupMap.set(key, {
-            templateName: d.templateName || '',
-            processCode: d.processCode || '',
-            items: [],
-          });
-        }
-        groupMap.get(key).items.push(d);
-      });
-
-      for (const g of groupMap.values()) {
-        if (g.items.length === 0) continue;
-        await cache.upsertMany(g.items, g.templateName, g.processCode);
-      }
-
-      console.log(
-        `[DingTalk][report][sync] 写入缓存：${valid.length} 条（${groupMap.size} 个分组）`
-      );
-    } catch (e) {
-      console.error('[DingTalk][report][sync] 写缓存失败', e.message);
-    }
-
-    let filtered = [...cachedFinals, ...freshDetails];
-
-    if (company) {
-      const keyword = String(company).trim();
-      filtered = filtered.filter(
-        (d) => d.paymentUnit && d.paymentUnit.includes(keyword)
-      );
-    }
-
-    let autoAssignedCount = 0;
-    filtered = filtered.map((d) => {
-      const r = dingtalkSync.resolveMemberRefundPaymentUnit(
-        d.templateName,
-        d.formValues || {},
-        d.paymentUnit,
-        d.createTime
-      );
-      if (r.autoAssigned) autoAssignedCount++;
-      return {
-        ...d,
-        paymentUnit: r.paymentUnit,
-        _autoAssigned: r.autoAssigned,
-        _storeName: r.storeName,
-        _assignReason: r.reason,
-      };
-    });
-
-    const results = filtered.map((d) => {
-      const base = {
+      const results = filtered.map((d) => ({
         templateName: d.templateName,
         processCode: d.processCode,
         processInstanceId: d.processInstanceId,
@@ -770,39 +548,249 @@ router.get('/dingtalk/report', async (req, res) => {
         _autoAssigned: d._autoAssigned === true,
         _storeName: d._storeName || null,
         _assignReason: d._assignReason || '',
-      };
-      if (includeRaw === '1') {
-        base.originatorUserId = d.originatorUserId;
-        base.originatorDeptId = d.originatorDeptId;
-      }
-      return base;
-    });
+      }));
 
-    const cost = Date.now() - t0;
-    console.log(
-      `[DingTalk][report][sync] 完成：返回 ${results.length} 条，耗时 ${cost}ms`
-    );
-
-    res.json({
-      errorcode: 0,
-      errormsg: '获取成功（同步）',
-      data: {
-        source: 'dingtalk+sync',
-        startTime: startTs,
-        endTime: endTs,
-        filter: {
-          type: type || null,
-          company: company || null,
-          excludeTemplates: EXCLUDE_KEYWORDS,
+      const cost = Date.now() - t0;
+      return res.json({
+        errorcode: 0,
+        errormsg: '获取成功（缓存）',
+        data: {
+          source: 'cache',
+          startTime: startTs,
+          endTime: endTs,
+          totalTemplates: templates.length,
+          totalCount: results.length,
+          autoAssignedCount,
+          costMs: cost,
+          results,
         },
-        totalTemplates: templates.length,
-        beforeFilterCount: cachedFinals.length + freshDetails.length,
-        totalCount: results.length,
-        autoAssignedCount,
-        costMs: cost,
-        results,
-      },
-    });
+      });
+    }
+
+    /* 路径 B：同步并查询 */
+    try {
+      await dingtalkSync.markRun('running', '手动同步并查询（触发中）');
+    } catch (e) {
+      console.warn('[DingTalk][report][sync] markRun running 失败', e.message);
+    }
+
+    try {
+      const templateResults = [];
+      for (const tpl of templates) {
+        try {
+          const ids = await fetchProcessInstanceIds(
+            tpl.processCode,
+            startTs,
+            endTs
+          );
+          templateResults.push({ ...tpl, instanceIds: ids });
+        } catch (e) {
+          templateResults.push({ ...tpl, instanceIds: [], error: e.message });
+        }
+      }
+
+      const processCodes = templateResults.map((t) => t.processCode);
+
+      let cachedFinals = [];
+      try {
+        cachedFinals = await cache.getCachedFinals(
+          startTs,
+          endTs,
+          processCodes
+        );
+      } catch (e) {
+        console.error('[DingTalk][report][sync] 查缓存失败', e.message);
+      }
+
+      const allInstanceIds = [];
+      templateResults.forEach((tr) => {
+        tr.instanceIds.forEach((id) => allInstanceIds.push(id));
+      });
+
+      const finalIds = await cache
+        .getFinalIds(allInstanceIds)
+        .catch(() => new Set());
+      const needFetchIds = allInstanceIds.filter((id) => !finalIds.has(id));
+
+      const idToTpl = new Map();
+      templateResults.forEach((tr) => {
+        tr.instanceIds.forEach((id) => {
+          idToTpl.set(id, { name: tr.name, code: tr.processCode });
+        });
+      });
+
+      const freshDetails = [];
+      const FLOW_INTERVAL_MS = 100;
+
+      for (const id of needFetchIds) {
+        const started = Date.now();
+        const tpl = idToTpl.get(id) || {};
+        try {
+          const detail = await fetchInstanceDetail(id);
+          freshDetails.push({
+            templateName: tpl.name,
+            processCode: tpl.code,
+            ...detail,
+          });
+        } catch (e) {
+          freshDetails.push({
+            templateName: tpl.name,
+            processCode: tpl.code,
+            processInstanceId: id,
+            error: e.message,
+          });
+        }
+        const elapsed = Date.now() - started;
+        if (elapsed < FLOW_INTERVAL_MS) {
+          await new Promise((r) => setTimeout(r, FLOW_INTERVAL_MS - elapsed));
+        }
+      }
+
+      try {
+        const valid = freshDetails.filter((d) => !d.error);
+
+        valid.forEach((d) => {
+          const r = dingtalkSync.resolveMemberRefundPaymentUnit(
+            d.templateName,
+            d.formValues || {},
+            d.paymentUnit,
+            d.createTime
+          );
+          d.paymentUnit = r.paymentUnit;
+          if (d.templateName === dingtalkSync.MEMBER_REFUND_TEMPLATE) {
+            d.formValues = {
+              ...(d.formValues || {}),
+              __autoAssigned: r.autoAssigned ? '1' : '0',
+              __storeName: r.storeName || '',
+              __assignReason: r.reason || '',
+            };
+          }
+        });
+
+        const groupMap = new Map();
+        valid.forEach((d) => {
+          const key = `${d.templateName || ''}||${d.processCode || ''}`;
+          if (!groupMap.has(key)) {
+            groupMap.set(key, {
+              templateName: d.templateName || '',
+              processCode: d.processCode || '',
+              items: [],
+            });
+          }
+          groupMap.get(key).items.push(d);
+        });
+
+        for (const g of groupMap.values()) {
+          if (g.items.length === 0) continue;
+          await cache.upsertMany(g.items, g.templateName, g.processCode);
+        }
+      } catch (e) {
+        console.error('[DingTalk][report][sync] 写缓存失败', e.message);
+      }
+
+      let filtered = [...cachedFinals, ...freshDetails];
+      if (company) {
+        const keyword = String(company).trim();
+        filtered = filtered.filter(
+          (d) => d.paymentUnit && d.paymentUnit.includes(keyword)
+        );
+      }
+
+      let autoAssignedCount = 0;
+      filtered = filtered.map((d) => {
+        const r = dingtalkSync.resolveMemberRefundPaymentUnit(
+          d.templateName,
+          d.formValues || {},
+          d.paymentUnit,
+          d.createTime
+        );
+        if (r.autoAssigned) autoAssignedCount++;
+        return {
+          ...d,
+          paymentUnit: r.paymentUnit,
+          _autoAssigned: r.autoAssigned,
+          _storeName: r.storeName,
+          _assignReason: r.reason,
+        };
+      });
+
+      const results = filtered.map((d) => ({
+        templateName: d.templateName,
+        processCode: d.processCode,
+        processInstanceId: d.processInstanceId,
+        title: d.title,
+        status: d.status,
+        result: d.result,
+        createTime: cache.normalizeDbTimeString(d.createTime) || '',
+        finishTime: cache.normalizeDbTimeString(d.finishTime) || '',
+        paymentUnit: d.paymentUnit,
+        payeeAccount: d.payeeAccount,
+        amount: d.amount,
+        items: d.items,
+        formValues: d.formValues,
+        operationRecords: d.operationRecords || [],
+        originatorName: d.originatorName || '',
+        pendingApprovers: d.pendingApprovers || [],
+        error: d.error,
+        _autoAssigned: d._autoAssigned === true,
+        _storeName: d._storeName || null,
+        _assignReason: d._assignReason || '',
+      }));
+
+      const cost = Date.now() - t0;
+      const syncMsg = `手动同步并查询：拉取 ${freshDetails.length} 条，写入 ${freshDetails.filter((d) => !d.error).length} 条，耗时 ${cost}ms`;
+
+      let finishedAt = '';
+      try {
+        await dingtalkSync.markRun('success', syncMsg);
+        const cfg = await dingtalkSync.getConfig();
+        finishedAt = cfg.last_run_at || '';
+      } catch (e) {
+        console.warn('[DingTalk][report][sync] markRun success 失败', e.message);
+      }
+
+      return res.json({
+        errorcode: 0,
+        errormsg: '获取成功（同步）',
+        data: {
+          source: 'dingtalk+sync',
+          startTime: startTs,
+          endTime: endTs,
+          totalTemplates: templates.length,
+          totalCount: results.length,
+          autoAssignedCount,
+          costMs: cost,
+          syncResult: {
+            finishedAt,
+            status: 'success',
+            message: syncMsg,
+          },
+          results,
+        },
+      });
+    } catch (e) {
+      console.error('[DingTalk][report][sync] 失败:', e.message);
+      let finishedAt = '';
+      try {
+        await dingtalkSync.markRun('failed', e.message);
+        const cfg = await dingtalkSync.getConfig();
+        finishedAt = cfg.last_run_at || '';
+      } catch (err) {
+        console.warn('[DingTalk][report][sync] markRun failed 失败', err.message);
+      }
+      return res.status(500).json({
+        errorcode: 500,
+        errormsg: e.message || '同步失败',
+        data: {
+          source: 'dingtalk+sync',
+          syncResult: {
+            finishedAt,
+            status: 'failed',
+            message: e.message || '同步失败',
+          },
+        },
+      });
+    }
   } catch (error) {
     console.error('[DingTalk][report] 失败:', error.message);
     res.status(500).json({
@@ -812,52 +800,214 @@ router.get('/dingtalk/report', async (req, res) => {
   }
 });
 
-/* 路由 4：单个实例详情 */
-router.get('/dingtalk/instance-detail', async (req, res) => {
+/* ============================================================
+ * 路由 6：月综合报告（按月份 + 门店读缓存）
+ *   GET /api/dingtalk/monthly-summary?month=2026-09&store=富贵园
+ * ============================================================ */
+router.get('/dingtalk/monthly-summary', async (req, res) => {
+  const t0 = Date.now();
   try {
-    const { processInstanceId } = req.query;
-    if (!processInstanceId)
+    const { month, store } = req.query;
+    if (!month || !/^\d{4}-\d{2}$/.test(month)) {
       return res
         .status(400)
-        .json({ errorcode: 400, errormsg: '缺少 processInstanceId' });
-    const detail = await fetchInstanceDetail(processInstanceId);
-    res.json({ errorcode: 0, errormsg: '获取成功', data: detail });
-  } catch (error) {
-    res.status(500).json({ errorcode: 500, errormsg: error.message });
-  }
-});
+        .json({ errorcode: 400, errormsg: '缺少或非法 month（YYYY-MM）' });
+    }
 
-/* 路由 5：批量实例详情 */
-router.post('/dingtalk/instances-detail', async (req, res) => {
-  try {
-    const { instanceIds } = req.body || {};
-    if (!Array.isArray(instanceIds) || instanceIds.length === 0) {
-      return res
-        .status(400)
-        .json({ errorcode: 400, errormsg: '请提供 instanceIds 数组' });
+    const [y, m] = month.split('-').map(Number);
+    const firstDay = `${month}-01`;
+    const lastDayNum = new Date(y, m, 0).getDate();
+    const lastDay = `${month}-${String(lastDayNum).padStart(2, '0')}`;
+
+    const startTs = parseDateTime(firstDay, false);
+    const endTs = parseDateTime(lastDay, true);
+
+    let templates = readTemplateCache();
+    const EXCLUDE_KEYWORDS = ['银行账户'];
+    templates = templates.filter(
+      (t) => t.name && !EXCLUDE_KEYWORDS.some((k) => t.name.includes(k))
+    );
+
+    const processCodes = templates.map((t) => t.processCode);
+
+    let cached = [];
+    try {
+      cached = await cache.getCachedAll(startTs, endTs, processCodes);
+    } catch (e) {
+      console.error('[DingTalk][monthly] 查缓存失败', e.message);
     }
-    const results = [];
-    const FLOW_INTERVAL_MS = 100;
-    for (const id of instanceIds) {
-      const started = Date.now();
-      try {
-        const detail = await fetchInstanceDetail(id);
-        results.push(detail);
-      } catch (e) {
-        results.push({ processInstanceId: id, error: e.message });
+
+    /* 会员退费门店归属 */
+    const enriched = cached.map((d) => {
+      const r = dingtalkSync.resolveMemberRefundPaymentUnit(
+        d.templateName,
+        d.formValues || {},
+        d.paymentUnit,
+        d.createTime
+      );
+      return {
+        ...d,
+        paymentUnit: r.paymentUnit,
+        _autoAssigned: r.autoAssigned,
+        _storeName: r.storeName,
+        _assignReason: r.reason,
+      };
+    });
+
+    /* ============================================================
+     * ⭐ 门店过滤
+     * ============================================================ */
+    const STORE_NAME = store ? String(store).trim() : '';
+    const STORE_UNIT_MAP = {
+      '哈德门': [
+        '北京林朗悦动体育管理有限公司',
+        '北京林朗体育管理有限公司',
+      ],
+      '富贵园': [
+        '北京林朗韵动体育管理有限公司',
+        '北京林朗体育管理有限公司东花市大街分公司',
+      ],
+    };
+
+    /* ⭐ 会员退费：paymentUnit 为空时，从表单文本里推断门店
+     *   - 明确写了「哈德门」→ 哈德门
+     *   - 明确写了「富贵园 / 东花市」→ 富贵园
+     *   - 两者都没有（如「月卡」「期限卡」「舞蹈课」）→ 富贵园兜底
+     */
+    const STORE_KEYWORDS = {
+      '哈德门': ['哈德门', '哈德'],
+      '富贵园': ['富贵园', '富贵', '东花市'],
+    };
+
+    function inferStoreFromRefund(d) {
+      const fv = d.formValues || {};
+      const text = [
+        fv['会员卡类型'],
+        fv['退卡原因'],
+        fv['收款账户'],
+        fv['持卡人姓名'],
+        d.title,
+      ]
+        .filter(Boolean)
+        .join(' ');
+
+      /* 1) 明确写了哈德门 → 哈德门 */
+      if (STORE_KEYWORDS['哈德门'].some((k) => text.includes(k))) {
+        return '哈德门';
       }
-      const elapsed = Date.now() - started;
-      if (elapsed < FLOW_INTERVAL_MS) {
-        await new Promise((r) => setTimeout(r, FLOW_INTERVAL_MS - elapsed));
+      /* 2) 明确写了富贵园 / 东花市 → 富贵园 */
+      if (STORE_KEYWORDS['富贵园'].some((k) => text.includes(k))) {
+        return '富贵园';
       }
+      /* 3) 都没有 → 富贵园兜底（会员退费业务基本在富贵园） */
+      return '富贵园';
     }
+
+    let filtered = enriched;
+    if (STORE_NAME && STORE_UNIT_MAP[STORE_NAME]) {
+      const units = STORE_UNIT_MAP[STORE_NAME];
+      filtered = enriched.filter((d) => {
+        const pu = String(d.paymentUnit || '').trim();
+
+        /* 1) 正常：paymentUnit 命中门店 */
+        if (pu && units.some((u) => pu.includes(u) || u.includes(pu))) {
+          return true;
+        }
+
+        /* 2) 会员退费且没有 paymentUnit：靠关键字推断门店 */
+        if (d.templateName === '会员退费' && !pu) {
+          const inferred = inferStoreFromRefund(d);
+          return inferred === STORE_NAME;
+        }
+
+        return false;
+      });
+      console.log(
+        `[DingTalk][monthly] 门店过滤「${STORE_NAME}」：${enriched.length} → ${filtered.length}`
+      );
+    }
+
+    /* ============================================================
+     * ⭐ 金额兜底（覆盖会员退费金额字段）
+     * ============================================================ */
+    function pickAmountSafe(d) {
+      const candidates = [
+        '补退金额（元）',
+        '补退金额',
+        '退款金额（元）',
+        '退款金额',
+        '报销金额',
+        '借款金额（元）',
+        '借款金额',
+        '本次申请支付金额（元）',
+        '本次申请支付金额',
+        '总价款（元）',
+        '金额（元）',
+        '金额',
+      ];
+      const fv = d.formValues || {};
+      for (const k of candidates) {
+        const v = fv[k];
+        if (v != null && v !== 'null' && v !== '') {
+          const n = Number(String(v).replace(/[^\d.-]/g, ''));
+          if (Number.isFinite(n) && n !== 0) return n;
+        }
+      }
+      const n0 = Number(d.amount);
+      if (Number.isFinite(n0) && n0 !== 0) return n0;
+      return 0;
+    }
+
+    const results = filtered.map((d) => ({
+      templateName: d.templateName,
+      processCode: d.processCode,
+      processInstanceId: d.processInstanceId,
+      title: d.title,
+      status: d.status,
+      result: d.result,
+      createTime: cache.normalizeDbTimeString(d.createTime) || '',
+      finishTime: cache.normalizeDbTimeString(d.finishTime) || '',
+      paymentUnit: d.paymentUnit,
+      payeeAccount: d.payeeAccount,
+      amount: pickAmountSafe(d),
+      items: d.items,
+      formValues: d.formValues,
+      operationRecords: d.operationRecords || [],
+      originatorName: d.originatorName || '',
+      pendingApprovers: d.pendingApprovers || [],
+      error: d.error,
+      _autoAssigned: d._autoAssigned === true,
+      _storeName: d._storeName || null,
+      _assignReason: d._assignReason || '',
+    }));
+
+    const cost = Date.now() - t0;
+    const totalAmount = results.reduce((s, r) => s + Number(r.amount || 0), 0);
+    console.log(
+      `[DingTalk][monthly] ${month}${STORE_NAME ? ' · ' + STORE_NAME : ''} 命中 ${results.length} 条 / ¥${totalAmount}，耗时 ${cost}ms`
+    );
+
     res.json({
       errorcode: 0,
       errormsg: '获取成功',
-      data: { count: results.length, results },
+      data: {
+        month,
+        store: STORE_NAME || null,
+        startTime: startTs,
+        endTime: endTs,
+        totalTemplates: templates.length,
+        totalCount: results.length,
+        totalAmount,
+        costMs: cost,
+        results,
+      },
     });
   } catch (error) {
-    res.status(500).json({ errorcode: 500, errormsg: error.message });
+    console.error('[DingTalk][monthly] 失败:', error.message);
+    res.status(500).json({
+      errorcode: 500,
+      errormsg: error.response?.data?.errmsg || error.message || '获取失败',
+    });
   }
 });
 

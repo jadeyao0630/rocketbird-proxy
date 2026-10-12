@@ -104,4 +104,169 @@ router.get('/monthly/dingtalk-expenses', async (req, res) => {
   }
 });
 
+/* ============================================================
+ * 路由 6：月综合报告（按月份 + 门店读缓存）
+ *   GET /api/dingtalk/monthly-summary?month=2026-10&store=富贵园
+ * ============================================================ */
+router.get('/dingtalk/monthly-summary', async (req, res) => {
+  const t0 = Date.now();
+  try {
+    const { month, store } = req.query;
+    if (!month || !/^\d{4}-\d{2}$/.test(month)) {
+      return res
+        .status(400)
+        .json({ errorcode: 400, errormsg: '缺少或非法 month（YYYY-MM）' });
+    }
+
+    const [y, m] = month.split('-').map(Number);
+    const firstDay = `${month}-01`;
+    const lastDayNum = new Date(y, m, 0).getDate();
+    const lastDay = `${month}-${String(lastDayNum).padStart(2, '0')}`;
+
+    const startTs = parseDateTime(firstDay, false);
+    const endTs = parseDateTime(lastDay, true);
+
+    let templates = readTemplateCache();
+    const EXCLUDE_KEYWORDS = ['银行账户'];
+    templates = templates.filter(
+      (t) => t.name && !EXCLUDE_KEYWORDS.some((k) => t.name.includes(k))
+    );
+
+    const processCodes = templates.map((t) => t.processCode);
+
+    let cached = [];
+    try {
+      cached = await cache.getCachedAll(startTs, endTs, processCodes);
+    } catch (e) {
+      console.error('[DingTalk][monthly] 查缓存失败', e.message);
+    }
+
+    /* 会员退费门店归属 */
+    const enriched = cached.map((d) => {
+      const r = dingtalkSync.resolveMemberRefundPaymentUnit(
+        d.templateName,
+        d.formValues || {},
+        d.paymentUnit,
+        d.createTime
+      );
+      return {
+        ...d,
+        paymentUnit: r.paymentUnit,
+        _autoAssigned: r.autoAssigned,
+        _storeName: r.storeName,
+        _assignReason: r.reason,
+      };
+    });
+
+    /* ⭐ 按门店过滤 */
+    const STORE_NAME = store ? String(store).trim() : '';
+    const STORE_UNIT_MAP = {
+      '哈德门': [
+        '北京林朗悦动体育管理有限公司',
+        '北京林朗体育管理有限公司',
+      ],
+      '富贵园': [
+        '北京林朗韵动体育管理有限公司',
+        '北京林朗体育管理有限公司东花市大街分公司',
+      ],
+    };
+
+    let filtered = enriched;
+    if (STORE_NAME && STORE_UNIT_MAP[STORE_NAME]) {
+      const units = STORE_UNIT_MAP[STORE_NAME];
+      filtered = enriched.filter((d) => {
+        const pu = String(d.paymentUnit || '');
+        return units.some((u) => pu.includes(u) || u.includes(pu));
+      });
+      console.log(
+        `[DingTalk][monthly] 门店过滤「${STORE_NAME}」：${enriched.length} → ${filtered.length}`
+      );
+    }
+
+    /* ⭐ 金额兜底（覆盖会员退费金额字段） */
+    function pickAmountSafe(d) {
+      const candidates = [
+        '补退金额（元）',
+        '补退金额',
+        '退款金额（元）',
+        '退款金额',
+        '报销金额',
+        '借款金额（元）',
+        '借款金额',
+        '本次申请支付金额（元）',
+        '本次申请支付金额',
+        '总价款（元）',
+        '金额（元）',
+        '金额',
+      ];
+      const fv = d.formValues || {};
+      for (const k of candidates) {
+        const v = fv[k];
+        if (v != null && v !== 'null' && v !== '') {
+          const n = Number(String(v).replace(/[^\d.-]/g, ''));
+          if (Number.isFinite(n) && n !== 0) return n;
+        }
+      }
+      const n0 = Number(d.amount);
+      if (Number.isFinite(n0) && n0 !== 0) return n0;
+      return 0;
+    }
+
+    const results = filtered.map((d) => ({
+      templateName: d.templateName,
+      processCode: d.processCode,
+      processInstanceId: d.processInstanceId,
+      title: d.title,
+      status: d.status,
+      result: d.result,
+      createTime: cache.normalizeDbTimeString(d.createTime) || '',
+      finishTime: cache.normalizeDbTimeString(d.finishTime) || '',
+      paymentUnit: d.paymentUnit,
+      payeeAccount: d.payeeAccount,
+      amount: pickAmountSafe(d),
+      items: d.items,
+      formValues: d.formValues,
+      operationRecords: d.operationRecords || [],
+      originatorName: d.originatorName || '',
+      pendingApprovers: d.pendingApprovers || [],
+      error: d.error,
+      _autoAssigned: d._autoAssigned === true,
+      _storeName: d._storeName || null,
+      _assignReason: d._assignReason || '',
+    }));
+
+    const cost = Date.now() - t0;
+    const totalAmount = results.reduce(
+      (s, r) => s + Number(r.amount || 0),
+      0
+    );
+    console.log(
+      `[DingTalk][monthly] ${month}${STORE_NAME ? ' · ' + STORE_NAME : ''} 命中 ${results.length} 条 / ¥${totalAmount}，耗时 ${cost}ms`
+    );
+
+    res.json({
+      errorcode: 0,
+      errormsg: '获取成功',
+      data: {
+        month,
+        store: STORE_NAME || null,
+        startTime: startTs,
+        endTime: endTs,
+        totalTemplates: templates.length,
+        /* ⭐ 与 results 里条数、金额严格一致 */
+        totalCount: results.length,
+        totalAmount,
+        costMs: cost,
+        results,
+      },
+    });
+  } catch (error) {
+    console.error('[DingTalk][monthly] 失败:', error.message);
+    res.status(500).json({
+      errorcode: 500,
+      errormsg: error.response?.data?.errmsg || error.message || '获取失败',
+    });
+  }
+});
+
 module.exports = router;
