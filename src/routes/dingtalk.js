@@ -6,6 +6,7 @@ const router = express.Router();
 
 const cache = require('../services/dingtalkCache');
 const dingtalkSync = require('../services/dingtalkSync');
+const manualStore = require('../services/manualStore');
 
 const DINGTALK_APP_KEY = process.env.DINGTALK_APP_KEY;
 const DINGTALK_APP_SECRET = process.env.DINGTALK_APP_SECRET;
@@ -509,7 +510,13 @@ router.get('/dingtalk/report', async (req, res) => {
         );
       }
 
+      /* ⭐ 先读手动归属（一次性批量） */
+      const manualMap = await manualStore.getManualStoreMap(
+        filtered.map((d) => d.processInstanceId).filter(Boolean)
+      );
+
       let autoAssignedCount = 0;
+      let manualAssignedCount = 0;
       filtered = filtered.map((d) => {
         const r = dingtalkSync.resolveMemberRefundPaymentUnit(
           d.templateName,
@@ -518,12 +525,28 @@ router.get('/dingtalk/report', async (req, res) => {
           d.createTime
         );
         if (r.autoAssigned) autoAssignedCount++;
+
+        /* ⭐ 手动归属优先覆盖 */
+        const manual = manualMap.get(d.processInstanceId);
+        if (manual) {
+          manualAssignedCount++;
+          return {
+            ...d,
+            paymentUnit: d.paymentUnit,
+            _autoAssigned: false,
+            _storeName: manual,
+            _assignReason: '手动归属',
+            _manualStore: true,
+          };
+        }
+
         return {
           ...d,
           paymentUnit: r.paymentUnit,
           _autoAssigned: r.autoAssigned,
           _storeName: r.storeName,
           _assignReason: r.reason,
+          _manualStore: false,
         };
       });
 
@@ -548,6 +571,7 @@ router.get('/dingtalk/report', async (req, res) => {
         _autoAssigned: d._autoAssigned === true,
         _storeName: d._storeName || null,
         _assignReason: d._assignReason || '',
+        _manualStore: d._manualStore === true,
       }));
 
       const cost = Date.now() - t0;
@@ -561,6 +585,7 @@ router.get('/dingtalk/report', async (req, res) => {
           totalTemplates: templates.length,
           totalCount: results.length,
           autoAssignedCount,
+          manualAssignedCount,
           costMs: cost,
           results,
         },
@@ -696,7 +721,13 @@ router.get('/dingtalk/report', async (req, res) => {
         );
       }
 
+      /* ⭐ 先读手动归属（一次性批量） */
+      const manualMap = await manualStore.getManualStoreMap(
+        filtered.map((d) => d.processInstanceId).filter(Boolean)
+      );
+
       let autoAssignedCount = 0;
+      let manualAssignedCount = 0;
       filtered = filtered.map((d) => {
         const r = dingtalkSync.resolveMemberRefundPaymentUnit(
           d.templateName,
@@ -705,12 +736,27 @@ router.get('/dingtalk/report', async (req, res) => {
           d.createTime
         );
         if (r.autoAssigned) autoAssignedCount++;
+
+        const manual = manualMap.get(d.processInstanceId);
+        if (manual) {
+          manualAssignedCount++;
+          return {
+            ...d,
+            paymentUnit: d.paymentUnit,
+            _autoAssigned: false,
+            _storeName: manual,
+            _assignReason: '手动归属',
+            _manualStore: true,
+          };
+        }
+
         return {
           ...d,
           paymentUnit: r.paymentUnit,
           _autoAssigned: r.autoAssigned,
           _storeName: r.storeName,
           _assignReason: r.reason,
+          _manualStore: false,
         };
       });
 
@@ -735,6 +781,7 @@ router.get('/dingtalk/report', async (req, res) => {
         _autoAssigned: d._autoAssigned === true,
         _storeName: d._storeName || null,
         _assignReason: d._assignReason || '',
+        _manualStore: d._manualStore === true,
       }));
 
       const cost = Date.now() - t0;
@@ -759,6 +806,7 @@ router.get('/dingtalk/report', async (req, res) => {
           totalTemplates: templates.length,
           totalCount: results.length,
           autoAssignedCount,
+          manualAssignedCount,
           costMs: cost,
           syncResult: {
             finishedAt,
@@ -837,8 +885,24 @@ router.get('/dingtalk/monthly-summary', async (req, res) => {
       console.error('[DingTalk][monthly] 查缓存失败', e.message);
     }
 
-    /* 会员退费门店归属 */
+    /* ⭐ 手动归属优先 */
+    const manualMap = await manualStore.getManualStoreMap(
+      cached.map((d) => d.processInstanceId).filter(Boolean)
+    );
+
+    /* 会员退费门店归属 + 手动覆盖 */
     const enriched = cached.map((d) => {
+      const manual = manualMap.get(d.processInstanceId);
+      if (manual) {
+        return {
+          ...d,
+          paymentUnit: d.paymentUnit,
+          _autoAssigned: false,
+          _storeName: manual,
+          _assignReason: '手动归属',
+          _manualStore: true,
+        };
+      }
       const r = dingtalkSync.resolveMemberRefundPaymentUnit(
         d.templateName,
         d.formValues || {},
@@ -851,7 +915,36 @@ router.get('/dingtalk/monthly-summary', async (req, res) => {
         _autoAssigned: r.autoAssigned,
         _storeName: r.storeName,
         _assignReason: r.reason,
+        _manualStore: false,
       };
+    });
+
+    const storeConfig = require('../services/storeConfig');
+
+    /* ============================================================
+     * ⭐ 门店配置：读 / 写
+     * ============================================================ */
+    router.get('/store-config', async (req, res) => {
+      try {
+        const stores = await storeConfig.listStores();
+        res.json({ errorcode: 0, errormsg: '获取成功', data: { stores } });
+      } catch (e) {
+        res.status(500).json({ errorcode: 500, errormsg: e.message });
+      }
+    });
+
+    router.post('/store-config', async (req, res) => {
+      try {
+        const stores = req.body?.stores;
+        if (!Array.isArray(stores)) {
+          return res.status(400).json({ errorcode: 400, errormsg: '缺少 stores 数组' });
+        }
+        await storeConfig.saveStores(stores);
+        const list = await storeConfig.listStores();
+        res.json({ errorcode: 0, errormsg: '保存成功', data: { stores: list } });
+      } catch (e) {
+        res.status(500).json({ errorcode: 500, errormsg: e.message });
+      }
     });
 
     /* ============================================================
@@ -869,11 +962,6 @@ router.get('/dingtalk/monthly-summary', async (req, res) => {
       ],
     };
 
-    /* ⭐ 会员退费：paymentUnit 为空时，从表单文本里推断门店
-     *   - 明确写了「哈德门」→ 哈德门
-     *   - 明确写了「富贵园 / 东花市」→ 富贵园
-     *   - 两者都没有（如「月卡」「期限卡」「舞蹈课」）→ 富贵园兜底
-     */
     const STORE_KEYWORDS = {
       '哈德门': ['哈德门', '哈德'],
       '富贵园': ['富贵园', '富贵', '东花市'],
@@ -891,15 +979,12 @@ router.get('/dingtalk/monthly-summary', async (req, res) => {
         .filter(Boolean)
         .join(' ');
 
-      /* 1) 明确写了哈德门 → 哈德门 */
       if (STORE_KEYWORDS['哈德门'].some((k) => text.includes(k))) {
         return '哈德门';
       }
-      /* 2) 明确写了富贵园 / 东花市 → 富贵园 */
       if (STORE_KEYWORDS['富贵园'].some((k) => text.includes(k))) {
         return '富贵园';
       }
-      /* 3) 都没有 → 富贵园兜底（会员退费业务基本在富贵园） */
       return '富贵园';
     }
 
@@ -907,14 +992,15 @@ router.get('/dingtalk/monthly-summary', async (req, res) => {
     if (STORE_NAME && STORE_UNIT_MAP[STORE_NAME]) {
       const units = STORE_UNIT_MAP[STORE_NAME];
       filtered = enriched.filter((d) => {
+        /* ⭐ 手动归属：优先命中 */
+        if (d._manualStore && d._storeName === STORE_NAME) return true;
+
         const pu = String(d.paymentUnit || '').trim();
 
-        /* 1) 正常：paymentUnit 命中门店 */
         if (pu && units.some((u) => pu.includes(u) || u.includes(pu))) {
           return true;
         }
 
-        /* 2) 会员退费且没有 paymentUnit：靠关键字推断门店 */
         if (d.templateName === '会员退费' && !pu) {
           const inferred = inferStoreFromRefund(d);
           return inferred === STORE_NAME;
@@ -927,9 +1013,6 @@ router.get('/dingtalk/monthly-summary', async (req, res) => {
       );
     }
 
-    /* ============================================================
-     * ⭐ 金额兜底（覆盖会员退费金额字段）
-     * ============================================================ */
     function pickAmountSafe(d) {
       const candidates = [
         '补退金额（元）',
@@ -979,6 +1062,7 @@ router.get('/dingtalk/monthly-summary', async (req, res) => {
       _autoAssigned: d._autoAssigned === true,
       _storeName: d._storeName || null,
       _assignReason: d._assignReason || '',
+      _manualStore: d._manualStore === true,
     }));
 
     const cost = Date.now() - t0;
@@ -1008,6 +1092,63 @@ router.get('/dingtalk/monthly-summary', async (req, res) => {
       errorcode: 500,
       errormsg: error.response?.data?.errmsg || error.message || '获取失败',
     });
+  }
+});
+
+/* ============================================================
+ * 路由 7：手动归属门店
+ *   POST   /api/dingtalk/manual-store      设置
+ *   DELETE /api/dingtalk/manual-store      删除
+ *   GET    /api/dingtalk/manual-store      查询单条
+ * ============================================================ */
+router.post('/dingtalk/manual-store', async (req, res) => {
+  try {
+    const { processInstanceId, storeName, updatedBy } = req.body || {};
+    if (!processInstanceId || !storeName) {
+      return res
+        .status(400)
+        .json({ errorcode: 400, errormsg: '缺少 processInstanceId / storeName' });
+    }
+    const r = await manualStore.setManualStore(
+      processInstanceId,
+      storeName,
+      updatedBy
+    );
+    res.json({ errorcode: 0, errormsg: '保存成功', data: r });
+  } catch (e) {
+    console.error('[DingTalk][manual-store] 保存失败', e.message);
+    res.status(500).json({ errorcode: 500, errormsg: e.message });
+  }
+});
+
+router.delete('/dingtalk/manual-store', async (req, res) => {
+  try {
+    const { processInstanceId } = req.query || {};
+    if (!processInstanceId) {
+      return res
+        .status(400)
+        .json({ errorcode: 400, errormsg: '缺少 processInstanceId' });
+    }
+    await manualStore.removeManualStore(processInstanceId);
+    res.json({ errorcode: 0, errormsg: '已恢复自动归属' });
+  } catch (e) {
+    console.error('[DingTalk][manual-store] 删除失败', e.message);
+    res.status(500).json({ errorcode: 500, errormsg: e.message });
+  }
+});
+
+router.get('/dingtalk/manual-store', async (req, res) => {
+  try {
+    const { processInstanceId } = req.query || {};
+    if (!processInstanceId) {
+      return res
+        .status(400)
+        .json({ errorcode: 400, errormsg: '缺少 processInstanceId' });
+    }
+    const storeName = await manualStore.getManualStore(processInstanceId);
+    res.json({ errorcode: 0, errormsg: '获取成功', data: { storeName } });
+  } catch (e) {
+    res.status(500).json({ errorcode: 500, errormsg: e.message });
   }
 });
 

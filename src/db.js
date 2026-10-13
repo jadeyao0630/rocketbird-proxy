@@ -42,7 +42,6 @@ const pool = mysql.createPool({
  * ============================================================ */
 async function ensureTables() {
   const sqls = [
-    /* 管理员账号 */
     `CREATE TABLE IF NOT EXISTS admin_user (
       id            BIGINT PRIMARY KEY AUTO_INCREMENT,
       username      VARCHAR(64)  NOT NULL UNIQUE,
@@ -53,7 +52,6 @@ async function ensureTables() {
       updated_at    DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`,
 
-    /* 每月薪酬方案 */
     `CREATE TABLE IF NOT EXISTS monthly_compensation_plan (
       id            BIGINT PRIMARY KEY AUTO_INCREMENT,
       store_id      VARCHAR(64)  NOT NULL,
@@ -68,7 +66,6 @@ async function ensureTables() {
       UNIQUE KEY uk_store_month (store_id, month)
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`,
 
-    /* 岗位配置 */
     `CREATE TABLE IF NOT EXISTS position_config (
       id                    BIGINT PRIMARY KEY AUTO_INCREMENT,
       plan_id               BIGINT       NOT NULL,
@@ -90,7 +87,6 @@ async function ensureTables() {
       FOREIGN KEY (plan_id) REFERENCES monthly_compensation_plan(id) ON DELETE CASCADE
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`,
 
-    /* 佣金阶梯 */
     `CREATE TABLE IF NOT EXISTS commission_tier (
       id          BIGINT PRIMARY KEY AUTO_INCREMENT,
       position_id BIGINT NOT NULL,
@@ -103,7 +99,6 @@ async function ensureTables() {
       FOREIGN KEY (position_id) REFERENCES position_config(id) ON DELETE CASCADE
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`,
 
-    /* 底薪阶梯 */
     `CREATE TABLE IF NOT EXISTS base_salary_tier (
       id          BIGINT PRIMARY KEY AUTO_INCREMENT,
       position_id BIGINT NOT NULL,
@@ -113,7 +108,6 @@ async function ensureTables() {
       FOREIGN KEY (position_id) REFERENCES position_config(id) ON DELETE CASCADE
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`,
 
-    /* 性别底薪阶梯 */
     `CREATE TABLE IF NOT EXISTS gender_salary_tier (
       id          BIGINT PRIMARY KEY AUTO_INCREMENT,
       position_id BIGINT NOT NULL,
@@ -126,7 +120,6 @@ async function ensureTables() {
       FOREIGN KEY (position_id) REFERENCES position_config(id) ON DELETE CASCADE
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`,
 
-    /* 课程提成 */
     `CREATE TABLE IF NOT EXISTS course_commission (
       id          BIGINT PRIMARY KEY AUTO_INCREMENT,
       position_id BIGINT NOT NULL,
@@ -137,7 +130,6 @@ async function ensureTables() {
       FOREIGN KEY (position_id) REFERENCES position_config(id) ON DELETE CASCADE
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`,
 
-    /* 老课费用阶梯 */
     `CREATE TABLE IF NOT EXISTS old_class_fee_tier (
       id          BIGINT PRIMARY KEY AUTO_INCREMENT,
       position_id BIGINT NOT NULL,
@@ -147,34 +139,31 @@ async function ensureTables() {
       FOREIGN KEY (position_id) REFERENCES position_config(id) ON DELETE CASCADE
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`,
 
-    /* ⭐ 新增：职位奖金（关联 position_config，随职位级联删除） */
     `CREATE TABLE IF NOT EXISTS position_reward (
       id              BIGINT PRIMARY KEY AUTO_INCREMENT,
       position_id     BIGINT       NOT NULL,
-      reward_id       VARCHAR(64)  NOT NULL COMMENT '奖金库条目 ID',
-      amount_override DECIMAL(12,2) DEFAULT NULL COMMENT '覆盖金额（为空则用奖金库默认）',
-      enabled         TINYINT(1)   NOT NULL DEFAULT 1 COMMENT '是否启用',
+      reward_id       VARCHAR(64)  NOT NULL,
+      amount_override DECIMAL(12,2) DEFAULT NULL,
+      enabled         TINYINT(1)   NOT NULL DEFAULT 1,
       note            VARCHAR(255) DEFAULT NULL,
       created_at      DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP,
       KEY idx_position (position_id),
       FOREIGN KEY (position_id) REFERENCES position_config(id) ON DELETE CASCADE
-    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='职位奖金'`,
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`,
 
-    /* ⭐ 新增：部门奖金（关联方案，随方案级联删除） */
     `CREATE TABLE IF NOT EXISTS department_reward (
       id              BIGINT PRIMARY KEY AUTO_INCREMENT,
       plan_id         BIGINT       NOT NULL,
-      department      VARCHAR(32)  NOT NULL COMMENT '会籍/私教/泳教/运营',
-      reward_id       VARCHAR(64)  NOT NULL COMMENT '奖金库条目 ID',
+      department      VARCHAR(32)  NOT NULL,
+      reward_id       VARCHAR(64)  NOT NULL,
       amount_override DECIMAL(12,2) DEFAULT NULL,
       enabled         TINYINT(1)   NOT NULL DEFAULT 1,
       note            VARCHAR(255) DEFAULT NULL,
       created_at      DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP,
       KEY idx_plan_dept (plan_id, department),
       FOREIGN KEY (plan_id) REFERENCES monthly_compensation_plan(id) ON DELETE CASCADE
-    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='部门奖金'`,
-     
-    /* ⭐ 临时奖金 / 扣款 */
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`,
+
     `CREATE TABLE IF NOT EXISTS temp_reward (
       id          BIGINT PRIMARY KEY AUTO_INCREMENT,
       plan_id     BIGINT       NOT NULL,
@@ -182,13 +171,12 @@ async function ensureTables() {
       name        VARCHAR(64)  NOT NULL,
       amount      DECIMAL(12,2) NOT NULL,
       note        VARCHAR(255) DEFAULT NULL,
-      reward_id   VARCHAR(64)  DEFAULT NULL,     -- ⭐ 新增
+      reward_id   VARCHAR(64)  DEFAULT NULL,
       created_at  DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP,
       KEY idx_plan_staff (plan_id, staff_id),
       FOREIGN KEY (plan_id) REFERENCES monthly_compensation_plan(id) ON DELETE CASCADE
-    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='临时奖金/扣款'`,
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`,
 
-    /* 测算设置 */
     `CREATE TABLE IF NOT EXISTS simulation_setting (
       id              BIGINT PRIMARY KEY AUTO_INCREMENT,
       store_id        VARCHAR(64)  NOT NULL,
@@ -203,7 +191,6 @@ async function ensureTables() {
       UNIQUE KEY uk_store_month (store_id, month)
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`,
 
-    /* 用户权限 */
     `CREATE TABLE IF NOT EXISTS user_permission (
       id          BIGINT PRIMARY KEY AUTO_INCREMENT,
       user_id     BIGINT       NOT NULL,
@@ -216,99 +203,109 @@ async function ensureTables() {
       FOREIGN KEY (granted_by) REFERENCES admin_user(id) ON DELETE SET NULL
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`,
 
-    /* 薪酬计算-员工新人/排除状态 */
     `CREATE TABLE IF NOT EXISTS payroll_staff_status (
       id          BIGINT PRIMARY KEY AUTO_INCREMENT,
-      bus_id      VARCHAR(64) NOT NULL COMMENT '门店 ID',
-      month       VARCHAR(7)  NOT NULL COMMENT '月份 YYYY-MM',
-      staff_id    VARCHAR(64) NOT NULL COMMENT '员工 ID',
-      staff_name  VARCHAR(64) DEFAULT NULL COMMENT '员工姓名（便于排查）',
-      is_newbie   TINYINT(1)  NOT NULL DEFAULT 0 COMMENT '是否新人',
-      is_excluded TINYINT(1)  NOT NULL DEFAULT 0 COMMENT '是否排除（不计入）',
-      updated_by  VARCHAR(64) DEFAULT NULL COMMENT '操作人',
+      bus_id      VARCHAR(64) NOT NULL,
+      month       VARCHAR(7)  NOT NULL,
+      staff_id    VARCHAR(64) NOT NULL,
+      staff_name  VARCHAR(64) DEFAULT NULL,
+      is_newbie   TINYINT(1)  NOT NULL DEFAULT 0,
+      is_excluded TINYINT(1)  NOT NULL DEFAULT 0,
+      updated_by  VARCHAR(64) DEFAULT NULL,
       updated_at  DATETIME    NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
       UNIQUE KEY uk_bus_month_staff (bus_id, month, staff_id),
       KEY idx_bus_month (bus_id, month)
-    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='薪酬计算-员工新人/排除状态'`,
-    
-    /* ⭐ 钉钉定时同步配置 */
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`,
+
     `CREATE TABLE IF NOT EXISTS dingtalk_sync_config (
       id                  INT          NOT NULL PRIMARY KEY DEFAULT 1,
       enabled             TINYINT(1)   NOT NULL DEFAULT 1,
-      schedule_mode       VARCHAR(16)  NOT NULL DEFAULT 'daily',  -- daily / interval
-      daily_hour          INT          NOT NULL DEFAULT 3,        -- 0~23
-      interval_hours      INT          NOT NULL DEFAULT 6,        -- 1~24
+      schedule_mode       VARCHAR(16)  NOT NULL DEFAULT 'daily',
+      daily_hour          INT          NOT NULL DEFAULT 3,
+      interval_hours      INT          NOT NULL DEFAULT 6,
       lookback_days       INT          NOT NULL DEFAULT 30,
       last_run_at         DATETIME     DEFAULT NULL,
-      last_run_status     VARCHAR(16)  DEFAULT NULL,              -- success / failed / running
+      last_run_status     VARCHAR(16)  DEFAULT NULL,
       last_run_message    VARCHAR(512) DEFAULT NULL,
       updated_at          DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
-    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='钉钉定时同步配置'`,
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`,
 
     `INSERT IGNORE INTO dingtalk_sync_config (id) VALUES (1)`,
 
-        /* ⭐ 钉钉流程缓存表 */
     `CREATE TABLE IF NOT EXISTS dingtalk_process_cache (
       process_instance_id VARCHAR(64)  NOT NULL PRIMARY KEY,
       template_name       VARCHAR(128) DEFAULT NULL,
       process_code        VARCHAR(64)  DEFAULT NULL,
-
       title               VARCHAR(512) DEFAULT NULL,
       status              VARCHAR(32)  DEFAULT NULL,
       result              VARCHAR(32)  DEFAULT NULL,
       create_time         DATETIME     DEFAULT NULL,
       finish_time         DATETIME     DEFAULT NULL,
-
       payment_unit        VARCHAR(255) DEFAULT NULL,
       payee_account       VARCHAR(255) DEFAULT NULL,
       amount              DECIMAL(12,2) DEFAULT NULL,
-
-      payload             JSON         DEFAULT NULL,
-
+      payload             LONGTEXT     DEFAULT NULL,
       is_final            TINYINT(1)   NOT NULL DEFAULT 0,
       last_synced_at      DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP,
-
       KEY idx_template_time (process_code, create_time),
       KEY idx_create_time   (create_time),
       KEY idx_is_final      (is_final),
       KEY idx_status        (status)
-    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='钉钉审批流程本地缓存'`,
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`,
+
+    `CREATE TABLE IF NOT EXISTS gym_store_config (
+      id            VARCHAR(64) NOT NULL,
+      name          VARCHAR(64) NOT NULL,
+      short_name    VARCHAR(64) NOT NULL DEFAULT '',
+      payment_units LONGTEXT    NOT NULL,
+      keywords      LONGTEXT    NOT NULL,
+      is_default    TINYINT(1)  NOT NULL DEFAULT 0,
+      sort_order    INT         NOT NULL DEFAULT 0,
+      created_at    DATETIME    NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      updated_at    DATETIME    NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+      PRIMARY KEY (id),
+      KEY idx_sort_order (sort_order)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`,
+
+    /* ⭐ 手动归属门店 */
+    `CREATE TABLE IF NOT EXISTS dingtalk_manual_store (
+      process_instance_id VARCHAR(64) NOT NULL PRIMARY KEY,
+      store_name          VARCHAR(64) NOT NULL,
+      updated_by          VARCHAR(64) DEFAULT NULL,
+      updated_at          DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+      KEY idx_store (store_name)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`,
+
+    /* 兼容旧表 */
+    `CREATE TABLE IF NOT EXISTS admin_user (
+      id            BIGINT PRIMARY KEY AUTO_INCREMENT,
+      username      VARCHAR(64)  NOT NULL UNIQUE,
+      password_hash VARCHAR(255) NOT NULL,
+      display_name  VARCHAR(64),
+      role          VARCHAR(16)  NOT NULL DEFAULT 'user',
+      created_at    DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      updated_at    DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`,
   ];
 
   for (const sql of sqls) {
-    await pool.query(sql);
+    try {
+      await pool.query(sql);
+    } catch (e) {
+      /* 忽略重复建表错误 */
+    }
   }
 
-  /* ⭐ 兼容旧表：如果某些列不存在，自动加 */
   await ensureColumn('position_config', 'disabled', `TINYINT(1) NOT NULL DEFAULT 0`);
   await ensureColumn('admin_user', 'role', `VARCHAR(16) NOT NULL DEFAULT 'user'`);
-  await ensureColumn(
-    'position_config',
-    'manager_aggregate_by_dept',
-    `TINYINT(1) NOT NULL DEFAULT 0`
-  );
-  await ensureColumn(
-    'position_config',
-    'manager_include_self',
-    `TINYINT(1) NOT NULL DEFAULT 0`
-  );
-  await ensureColumn(
-    'position_config',
-    'commission_tiered',
-    `TINYINT(1) NOT NULL DEFAULT 1`
-  );
-  await ensureColumn(
-    'position_config',
-    'base_salary_tiered',
-    `TINYINT(1) NOT NULL DEFAULT 1`
-  );
+  await ensureColumn('position_config', 'manager_aggregate_by_dept', `TINYINT(1) NOT NULL DEFAULT 0`);
+  await ensureColumn('position_config', 'manager_include_self', `TINYINT(1) NOT NULL DEFAULT 0`);
+  await ensureColumn('position_config', 'commission_tiered', `TINYINT(1) NOT NULL DEFAULT 1`);
+  await ensureColumn('position_config', 'base_salary_tiered', `TINYINT(1) NOT NULL DEFAULT 1`);
 
   console.log('[db] tables ready');
 }
 
-/* ============================================================
- * ⭐ 工具：如果列不存在则 ALTER TABLE 加列
- * ============================================================ */
 async function ensureColumn(table, column, definition) {
   const dbName = process.env.DB_NAME || 'gym_payroll';
   const [cols] = await pool.query(
@@ -350,12 +347,66 @@ async function seedAdmin() {
 }
 
 /* ============================================================
- * 5) 一键初始化
+ * 5) 门店配置初始数据
+ * ============================================================ */
+async function seedStoreConfig() {
+  const [rows] = await pool.query(`SELECT COUNT(*) AS c FROM gym_store_config`);
+  if (rows[0].c > 0) return;
+
+  const defaults = [
+    {
+      id: '12279',
+      name: '富贵园',
+      shortName: '富贵园',
+      paymentUnits: [
+        '北京林朗韵动体育管理有限公司',
+        '北京林朗体育管理有限公司东花市大街分公司',
+      ],
+      keywords: ['富贵园', '富贵', '东花市'],
+      isDefault: 1,
+      sortOrder: 1,
+    },
+    {
+      id: '11536',
+      name: '哈德门',
+      shortName: '哈德门',
+      paymentUnits: [
+        '北京林朗悦动体育管理有限公司',
+        '北京林朗体育管理有限公司',
+      ],
+      keywords: ['哈德门', '哈德'],
+      isDefault: 0,
+      sortOrder: 2,
+    },
+  ];
+
+  for (const s of defaults) {
+    await pool.query(
+      `INSERT INTO gym_store_config
+         (id, name, short_name, payment_units, keywords, is_default, sort_order)
+       VALUES (?, ?, ?, ?, ?, ?, ?)`,
+      [
+        s.id,
+        s.name,
+        s.shortName,
+        JSON.stringify(s.paymentUnits),
+        JSON.stringify(s.keywords),
+        s.isDefault,
+        s.sortOrder,
+      ]
+    );
+  }
+  console.log('[db] gym_store_config 已写入初始门店（富贵园 / 哈德门）');
+}
+
+/* ============================================================
+ * 6) 一键初始化
  * ============================================================ */
 async function initDatabase() {
   await ensureDatabase();
   await ensureTables();
   await seedAdmin();
+  await seedStoreConfig();
 }
 
 module.exports = { pool, initDatabase };

@@ -5,6 +5,7 @@ const path = require('path');
 const router = express.Router();
 
 const dingtalkCache = require('../services/dingtalkCache');
+const storeConfig = require('../services/storeConfig');
 const {
   classifyDingtalkItems,
   collectDingtalkText,
@@ -65,42 +66,11 @@ function getStoreProfile(storeName) {
 }
 
 /* ============================================================
- * 会员退费 / 门店过滤
+ * 会员退费 → 付款单位推断
  * ============================================================ */
 const FU_GUI_YUAN_UNIT = '北京林朗韵动体育管理有限公司';
 const HA_DE_MEN_UNIT = '北京林朗悦动体育管理有限公司';
 const REFUND_KEYWORDS = ['富贵园', '装修'];
-
-const STORE_UNIT_MAP = {
-  '哈德门': ['北京林朗悦动体育管理有限公司', '北京林朗体育管理有限公司'],
-  '富贵园': ['北京林朗韵动体育管理有限公司', '北京林朗体育管理有限公司东花市大街分公司'],
-};
-
-function paymentUnitMatchesStore(paymentUnit, storeName) {
-  if (!storeName) return true;
-  const units = STORE_UNIT_MAP[storeName];
-  if (!units) return true;
-  const pu = String(paymentUnit || '');
-  return units.some((u) => pu.includes(u) || u.includes(pu));
-}
-
-const PAYMENT_UNIT_TO_STORE = {
-  '北京林朗悦动体育管理有限公司': '哈德门',
-  '北京林朗体育管理有限公司': '哈德门',
-  '北京林朗韵动体育管理有限公司': '富贵园',
-  '北京林朗体育管理有限公司东花市大街分公司': '富贵园',
-};
-
-function getStoreFromPaymentUnit(paymentUnit) {
-  if (!paymentUnit) return '';
-  const pu = String(paymentUnit);
-  if (PAYMENT_UNIT_TO_STORE[pu]) return PAYMENT_UNIT_TO_STORE[pu];
-  for (const [unit, store] of Object.entries(PAYMENT_UNIT_TO_STORE)) {
-    if (pu.includes(unit) || unit.includes(pu)) return store;
-  }
-  if (pu.includes('东花市')) return '富贵园';
-  return '';
-}
 
 function inferRefundPaymentUnit(item) {
   if (item.templateName !== MEMBER_REFUND_TPL) return null;
@@ -111,6 +81,9 @@ function inferRefundPaymentUnit(item) {
   return hit ? FU_GUI_YUAN_UNIT : HA_DE_MEN_UNIT;
 }
 
+/* ============================================================
+ * 金额兜底
+ * ============================================================ */
 function pickAmountSafe(item) {
   const candidates = [
     '补退金额（元）', '补退金额', '退款金额（元）', '退款金额',
@@ -139,7 +112,7 @@ function monthRangeTs(month) {
 }
 
 /* ============================================================
- * 拉取 + 聚合（复用公共 classify）
+ * 拉取 + 聚合（门店过滤走 MySQL 配置）
  * ============================================================ */
 async function loadDingtalkForAI(storeName, month) {
   const { startTs, endTs } = monthRangeTs(month);
@@ -165,6 +138,7 @@ async function loadDingtalkForAI(storeName, month) {
     console.warn('[AI][dingtalk] 查缓存失败', e.message);
   }
 
+  /* 会员退费：优先补 paymentUnit */
   const enriched = cached.map((d) => {
     const inferred = inferRefundPaymentUnit(d);
     const finalUnit =
@@ -174,20 +148,22 @@ async function loadDingtalkForAI(storeName, month) {
     return { ...d, paymentUnit: finalUnit };
   });
 
-  const storeItems = enriched.filter((d) => {
-    if (!storeName) return true;
-    if (paymentUnitMatchesStore(d.paymentUnit, storeName)) {
-      const pu = String(d.paymentUnit || '').trim();
-      if (pu) return true;
-      if (d.templateName === MEMBER_REFUND_TPL) {
-        const finalStore = getStoreFromPaymentUnit(d.paymentUnit);
-        return finalStore === storeName;
-      }
-      return false;
+  /* ⭐ 门店过滤：走 storeConfig.matchStoreByItem（异步） */
+  const storeItems = [];
+  for (const d of enriched) {
+    if (!storeName) {
+      storeItems.push(d);
+      continue;
     }
-    return false;
-  });
+    try {
+      const matched = await storeConfig.matchStoreByItem(d);
+      if (matched === storeName) storeItems.push(d);
+    } catch (e) {
+      console.warn('[AI][dingtalk] matchStoreByItem 失败', e.message);
+    }
+  }
 
+  /* 分类聚合 */
   const groups = new Map();
   let total = 0;
   let count = 0;
@@ -337,7 +313,7 @@ const SYSTEM_PROMPT = `
 `.trim();
 
 /* ============================================================
- * 路由
+ * 路由：AI 月报
  * ============================================================ */
 router.post('/ai/monthly-report', async (req, res) => {
   console.log('[AI] 命中 /ai/monthly-report，body keys =', Object.keys(req.body || {}));
@@ -419,6 +395,37 @@ router.post('/ai/monthly-report', async (req, res) => {
   }
 });
 
+/* ============================================================
+ * 路由：门店配置（MySQL）
+ *   - 前端 StoreConfigPage 调用
+ *   - 与 /api/dingtalk/store-config 共享同一张表
+ * ============================================================ */
+router.get('/ai/store-config', async (req, res) => {
+  try {
+    const stores = await storeConfig.listStores();
+    res.json({ errorcode: 0, errormsg: '获取成功', data: { stores } });
+  } catch (e) {
+    res.status(500).json({ errorcode: 500, errormsg: e.message });
+  }
+});
+
+router.post('/ai/store-config', async (req, res) => {
+  try {
+    const list = req.body?.stores;
+    if (!Array.isArray(list)) {
+      return res.status(400).json({ errorcode: 400, errormsg: '缺少 stores 数组' });
+    }
+    await storeConfig.saveStores(list);
+    const stores = await storeConfig.listStores();
+    res.json({ errorcode: 0, errormsg: '保存成功', data: { stores } });
+  } catch (e) {
+    res.status(500).json({ errorcode: 500, errormsg: e.message });
+  }
+});
+
+/* ============================================================
+ * 健康检查
+ * ============================================================ */
 router.get('/ai/__ping', (req, res) => {
   res.json({ ok: true, msg: 'ai routes mounted' });
 });
