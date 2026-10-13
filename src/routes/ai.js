@@ -5,6 +5,11 @@ const path = require('path');
 const router = express.Router();
 
 const dingtalkCache = require('../services/dingtalkCache');
+const {
+  classifyDingtalkItems,
+  collectDingtalkText,
+  MEMBER_REFUND_TPL,
+} = require('../services/dingtalkClassify');
 
 const ARK_API_KEY = process.env.ARK_API_KEY;
 const ARK_MODEL_ID = process.env.ARK_MODEL_ID;
@@ -27,11 +32,11 @@ const STORE_PROFILES = {
   '富贵园': {
     name: '富贵园店',
     area: '3000 多平米',
-    facilities: ['泳池','操房','乒乓球','篮球场','私教区','搏击区','有氧区','器械区'],
+    facilities: ['泳池', '操房', '乒乓球', '篮球场', '私教区', '搏击区', '有氧区', '器械区'],
     positioning:
       '综合型旗舰店，设施齐全、面积大、可承载泳教 / 篮球 / 搏击 / 操课等多业态；固定成本（水电、物业、租金、保洁）体量明显高于哈德门。',
     focus: [
-      '泳池、篮球场、操房等高能耗 / 高维护区域是水电费、保洁费、维修费的主要来源，需要单独关注其坪效。',
+      '泳池、篮球场、操房等高能耗 / 高维护区域是电费、水费、保洁费、维修费的主要来源，需要单独关注其坪效。',
       '多业态意味着收入结构更分散，需关注各业态（售卡 vs 售课 vs 泳教）的毛利差异。',
       '大面积场地固定成本刚性高，盈亏平衡点更依赖收入规模，需重点看坪效与人效。',
     ],
@@ -39,7 +44,7 @@ const STORE_PROFILES = {
   '哈德门': {
     name: '哈德门店',
     area: '600 多平米',
-    facilities: ['私教区','有氧区','器械区','操房','乒乓球'],
+    facilities: ['私教区', '有氧区', '器械区', '操房', '乒乓球'],
     positioning:
       '小而精社区型门店，以私教、有氧、器械、操房为主；固定成本相对低，坪效 / 人效是关键指标。',
     focus: [
@@ -60,9 +65,8 @@ function getStoreProfile(storeName) {
 }
 
 /* ============================================================
- * 会员退费 / 门店过滤相关
+ * 会员退费 / 门店过滤
  * ============================================================ */
-const MEMBER_REFUND_TPL = '会员退费';
 const FU_GUI_YUAN_UNIT = '北京林朗韵动体育管理有限公司';
 const HA_DE_MEN_UNIT = '北京林朗悦动体育管理有限公司';
 const REFUND_KEYWORDS = ['富贵园', '装修'];
@@ -98,54 +102,10 @@ function getStoreFromPaymentUnit(paymentUnit) {
   return '';
 }
 
-function collectRefundItemText(item) {
-  const parts = [];
-  if (Array.isArray(item.items)) {
-    item.items.forEach((it) => {
-      if (it?.content) parts.push(String(it.content));
-    });
-  }
-  const fv = item.formValues || {};
-  const rawDetail = fv['明细列表'];
-  if (typeof rawDetail === 'string' && rawDetail && rawDetail !== 'null') {
-    try {
-      const parsed = JSON.parse(rawDetail);
-      if (Array.isArray(parsed)) {
-        parsed.forEach((row) => {
-          (row?.rowValue || []).forEach((f) => {
-            const label = String(f?.label || '');
-            if (label.includes('事项') || label.includes('内容') || label.includes('名称')) {
-              if (f?.value != null && f.value !== 'null') {
-                parts.push(String(f.value));
-              }
-            }
-          });
-        });
-      }
-    } catch {
-      parts.push(String(rawDetail));
-    }
-  }
-  [
-    '退卡原因','事项','事项/明细','报销事由','费用类型','明细',
-    '付款内容提要','付款事由','付款用途','借款提要',
-    '备注','说明','用途','摘要','事由',
-  ].forEach((k) => {
-    const v = fv[k];
-    if (v == null || v === 'null' || v === '') return;
-    if (typeof v === 'object') {
-      try { parts.push(JSON.stringify(v)); } catch {}
-    } else {
-      parts.push(String(v));
-    }
-  });
-  return parts.join(' ');
-}
-
 function inferRefundPaymentUnit(item) {
   if (item.templateName !== MEMBER_REFUND_TPL) return null;
   if (item.paymentUnit && String(item.paymentUnit).trim()) return null;
-  const combined = collectRefundItemText(item);
+  const combined = collectDingtalkText(item);
   if (!combined) return HA_DE_MEN_UNIT;
   const hit = REFUND_KEYWORDS.some((k) => combined.includes(k));
   return hit ? FU_GUI_YUAN_UNIT : HA_DE_MEN_UNIT;
@@ -153,10 +113,10 @@ function inferRefundPaymentUnit(item) {
 
 function pickAmountSafe(item) {
   const candidates = [
-    '补退金额（元）','补退金额','退款金额（元）','退款金额',
-    '报销金额','借款金额（元）','借款金额',
-    '本次申请支付金额（元）','本次申请支付金额',
-    '总价款（元）','金额（元）','金额',
+    '补退金额（元）', '补退金额', '退款金额（元）', '退款金额',
+    '报销金额', '借款金额（元）', '借款金额',
+    '本次申请支付金额（元）', '本次申请支付金额',
+    '总价款（元）', '金额（元）', '金额',
   ];
   const fv = item.formValues || {};
   for (const k of candidates) {
@@ -179,103 +139,7 @@ function monthRangeTs(month) {
 }
 
 /* ============================================================
- * 分类规则
- * ============================================================ */
-const PAYEE_CATEGORY_OVERRIDES = [
-  { payee: '山东云优人力资源服务有限公司', category: '工资底薪佣金' },
-];
-
-const SUBJECT_RULES = [
-  { key: '物业费', keywords: ['物业费', '物业'], applyTemplates: ['员工费用报销', '付款申请单'] },
-  { key: '水电费', keywords: ['电费', '水费', '水电'], applyTemplates: ['员工费用报销', '付款申请单'] },
-  { key: '工资底薪佣金', keywords: ['工资','底薪','佣金','提成','薪酬','薪金','劳务','派遣','人力资源'] },
-  { key: '修理', keywords: ['修理','维修','修缮','保养','配件更换','更换','安装','装修'], applyTemplates: ['员工费用报销', '付款申请单'] },
-  {
-    key: '日常支出',
-    keywords: [
-      '办公','办公用品','日用','清洁','保洁','耗材','快递','邮寄',
-      '差旅','交通','通讯','话费','劳保','低值易耗','消耗',
-      '采购','购买','宣传','广告','推广','营销','物料','印刷',
-    ],
-    applyTemplates: ['员工费用报销', '付款申请单'],
-  },
-];
-
-function collectItemText(item) {
-  const parts = [];
-  if (Array.isArray(item.items)) {
-    item.items.forEach((it) => {
-      if (it?.content) parts.push(String(it.content));
-    });
-  }
-  const fv = item.formValues || {};
-  const rawDetail = fv['明细列表'];
-  if (typeof rawDetail === 'string' && rawDetail && rawDetail !== 'null') {
-    try {
-      const parsed = JSON.parse(rawDetail);
-      if (Array.isArray(parsed)) {
-        parsed.forEach((row) => {
-          (row?.rowValue || []).forEach((f) => {
-            const label = String(f?.label || '');
-            if (label.includes('事项') || label.includes('内容') || label.includes('名称')) {
-              if (f?.value != null && f.value !== 'null') {
-                parts.push(String(f.value));
-              }
-            }
-          });
-        });
-      }
-    } catch { /* ignore */ }
-  }
-  if (item.title) parts.push(String(item.title));
-  [
-    '事项','事项/明细','报销事由','费用类型','明细',
-    '备注','事由','用途','摘要','说明',
-    '付款内容提要','付款事由','付款用途',
-    '借款提要','退卡原因',
-  ].forEach((k) => {
-    const v = fv[k];
-    if (v == null || v === 'null' || v === '') return;
-    if (typeof v === 'object') {
-      try { parts.push(JSON.stringify(v)); } catch {}
-    } else {
-      parts.push(String(v));
-    }
-  });
-  return parts.join(' ');
-}
-
-function classifyDingtalkItem(item) {
-  const tpl = String(item.templateName || '').trim();
-  if (tpl.includes('退费') || tpl.includes('退款')) return '退费';
-  if (tpl === MEMBER_REFUND_TPL) return '退费';
-
-  const payee = String(item.payeeAccount || '').trim();
-  for (const rule of PAYEE_CATEGORY_OVERRIDES) {
-    if (payee === rule.payee) return rule.category;
-  }
-
-  const text = collectItemText(item);
-  if (text) {
-    if (['退费','退款','退卡','退课'].some((k) => text.includes(k))) {
-      return '退费';
-    }
-    for (const rule of SUBJECT_RULES) {
-      if (
-        rule.applyTemplates &&
-        rule.applyTemplates.length > 0 &&
-        !rule.applyTemplates.includes(tpl)
-      ) continue;
-      if (rule.keywords.some((k) => k && text.includes(k))) {
-        return rule.key;
-      }
-    }
-  }
-  return tpl || '其它';
-}
-
-/* ============================================================
- * 拉取 + 聚合
+ * 拉取 + 聚合（复用公共 classify）
  * ============================================================ */
 async function loadDingtalkForAI(storeName, month) {
   const { startTs, endTs } = monthRangeTs(month);
@@ -330,7 +194,8 @@ async function loadDingtalkForAI(storeName, month) {
   const breakdown = {
     salary: { count: 0, total: 0 },
     property: { count: 0, total: 0 },
-    utility: { count: 0, total: 0 },
+    electric: { count: 0, total: 0 },
+    water: { count: 0, total: 0 },
     repair: { count: 0, total: 0 },
     daily: { count: 0, total: 0 },
     refund: { count: 0, total: 0 },
@@ -339,31 +204,33 @@ async function loadDingtalkForAI(storeName, month) {
 
   for (const item of storeItems) {
     if (item.error) continue;
-    const category = classifyDingtalkItem(item);
-    const amount = pickAmountSafe(item);
 
-    if (!groups.has(category)) {
-      groups.set(category, { category, count: 0, total: 0, samples: [] });
+    const pieces = classifyDingtalkItems(item, pickAmountSafe);
+    for (const p of pieces) {
+      if (!groups.has(p.category)) {
+        groups.set(p.category, { category: p.category, count: 0, total: 0, samples: [] });
+      }
+      const g = groups.get(p.category);
+      g.count += 1;
+      g.total += p.amount;
+
+      if (g.samples.length < 5) {
+        const text = collectDingtalkText(item) || item.title || '';
+        if (text && text !== '—') g.samples.push(text.slice(0, 60));
+      }
+
+      if (p.category === '工资底薪佣金') { breakdown.salary.count += 1; breakdown.salary.total += p.amount; }
+      else if (p.category === '物业费') { breakdown.property.count += 1; breakdown.property.total += p.amount; }
+      else if (p.category === '电费') { breakdown.electric.count += 1; breakdown.electric.total += p.amount; }
+      else if (p.category === '水费') { breakdown.water.count += 1; breakdown.water.total += p.amount; }
+      else if (p.category === '修理') { breakdown.repair.count += 1; breakdown.repair.total += p.amount; }
+      else if (p.category === '日常支出') { breakdown.daily.count += 1; breakdown.daily.total += p.amount; }
+      else if (p.category === '退费') { breakdown.refund.count += 1; breakdown.refund.total += p.amount; }
+      else { breakdown.other.count += 1; breakdown.other.total += p.amount; }
+
+      total += p.amount;
+      count += 1;
     }
-    const g = groups.get(category);
-    g.count += 1;
-    g.total += amount;
-
-    if (g.samples.length < 5) {
-      const text = collectItemText(item) || item.title || '';
-      if (text && text !== '—') g.samples.push(text.slice(0, 60));
-    }
-
-    if (category === '工资底薪佣金') { breakdown.salary.count += 1; breakdown.salary.total += amount; }
-    else if (category === '物业费') { breakdown.property.count += 1; breakdown.property.total += amount; }
-    else if (category === '水电费') { breakdown.utility.count += 1; breakdown.utility.total += amount; }
-    else if (category === '修理') { breakdown.repair.count += 1; breakdown.repair.total += amount; }
-    else if (category === '日常支出') { breakdown.daily.count += 1; breakdown.daily.total += amount; }
-    else if (category === '退费') { breakdown.refund.count += 1; breakdown.refund.total += amount; }
-    else { breakdown.other.count += 1; breakdown.other.total += amount; }
-
-    total += amount;
-    count += 1;
   }
 
   const categories = Array.from(groups.values())
@@ -401,16 +268,18 @@ const SYSTEM_PROMPT = `
 
 【成本口径说明 — 必须遵守】
 
-1. **实际总支出** = 薪酬（扣除钉钉已发）+ 固定成本（扣除钉钉已付）+ 钉钉全部支出
-   - 钉钉全部支出 = 工资底薪佣金 + 物业费 + 水电费 + 修理 + 日常支出 + 退费 + 其它
-2. **重复类以钉钉实际为准**：
-   - 工资底薪佣金：payroll 里预估了一个数，钉钉又实际发生了若干笔 → 以钉钉金额为准，payroll 里对应的部分不再重复计入
-   - 物业费 / 水电费：fixedCost 里预估了一个数，钉钉又实际发生了若干笔 → 以钉钉金额为准
-3. 「钉钉事项明细分析」段落**必须列出「预估 vs 钉钉实际」对比**，格式：
-   - **工资底薪佣金**：预估 ¥X（payroll），钉钉实际 ¥Y（N 笔），差额 ¥(Y-X)，{判断是偏高还是偏低}
-   - **物业费**：预估 ¥X（fixedCost），钉钉实际 ¥Y（N 笔）
-   - **水电费**：预估 ¥X（fixedCost），钉钉实际 ¥Y（N 笔）
-4. 若「钉钉实际」明显大于或小于「预估」，必须点出，并提示用户核查是否存在跨期、重复列支、漏记等问题。
+1. **预估总支出** = 薪酬（payroll）+ 固定成本（fixedCost）
+2. **钉钉实际支出（新增）** = 退费 + 修理 + 日常支出 + 其它
+   - 不含工资底薪佣金、物业费、电费、水费，因为这四项已包含在 payroll / fixedCost 里，避免重复
+   - 钉钉的工资底薪佣金 / 物业费 / 电费 / 水费 只作为「预估 vs 实际」的对比展示，不重复计入
+3. **实际总支出** = 预估总支出 + 钉钉实际支出（新增）
+4. 「钉钉事项明细分析」段落**必须列出「预估 vs 钉钉实际」对比**，格式：
+   - **工资底薪佣金**：预估 ¥X（payroll），钉钉实际 ¥Y（N 项）
+   - **物业费**：预估 ¥X（fixedCost.propertyFee），钉钉实际 ¥Y（N 项）
+   - **电费**：预估 ¥X（fixedCost.electricityFee），钉钉实际 ¥Y（N 项）
+   - **水费**：预估 ¥X（fixedCost.waterFee），钉钉实际 ¥Y（N 项）
+   - **钉钉新增支出**：退费 / 修理 / 日常支出 / 其它，¥Z（N 项）
+5. 若「钉钉实际」明显大于或小于「预估」，必须点出，并提示用户核查是否存在跨期、重复列支、漏记等问题。
 
 输出结构（严格按此，总长度控制在 900 字以内）：
 
@@ -420,19 +289,22 @@ const SYSTEM_PROMPT = `
 ## 核心指标速览
 （只列 8~12 个最关键指标，无序列表，不要展开）
 - 总收入：xxx 元
-- 总支出（实际）：xxx 元
-- 利润：xxx 元（利润率 x.x%）
+- 预估总支出：xxx 元
+- 钉钉实际支出（新增）：xxx 元
+- 实际总支出：xxx 元
+- 预估利润：xxx 元
+- 实际利润：xxx 元（利润率 x.x%）
 - 薪酬占收入：x.x%
 - 售卡 Top1 卡种：xxx（占 xx.x%）
 - 售课 Top1 课种：xxx（占 xx.x%）
-- 钉钉流程总额：xxx 元（共 xx 笔）
 
 ## 钉钉事项明细分析
 （**这一段必须写**，围绕下列类别逐项分析，每条 1~2 句：金额、笔数、占比、是否异常、值得关注的点）
 类别：
 - 工资底薪佣金（**必须列预估 vs 钉钉实际对比**）
 - 物业费（**必须列预估 vs 钉钉实际对比**）
-- 水电费（**必须列预估 vs 钉钉实际对比**）
+- 电费（**必须列预估 vs 钉钉实际对比**）
+- 水费（**必须列预估 vs 钉钉实际对比**）
 - 修理
 - 日常支出
 - 退费
@@ -442,8 +314,8 @@ const SYSTEM_PROMPT = `
 1. 按金额从大到小列出；
 2. 每类给出金额、笔数、占钉钉总额的百分比；
 3. **结合门店硬件解释合理性**：
-   - 富贵园店：3000+ 平、含泳池/篮球场/操房/搏击区/乒乓球/私教/有氧/器械。水电费、保洁费、物业费、修理费偏高**属于正常**，但要判断「偏高是否与面积匹配」「单平米成本是否高于行业均值」。
-   - 哈德门店：600+ 平、含私教/有氧/器械/操房/乒乓球。若水电费、修理费偏高则**相对异常**，需排查设备老化、跑冒滴漏或排课冲突。
+   - 富贵园店：3000+ 平、含泳池/篮球场/操房/搏击区/乒乓球/私教/有氧/器械。电费、水费、保洁费、物业费、修理费偏高**属于正常**，但要判断「偏高是否与面积匹配」「单平米成本是否高于行业均值」。
+   - 哈德门店：600+ 平、含私教/有氧/器械/操房/乒乓球。若电费、水费、修理费偏高则**相对异常**，需排查设备老化、跑冒滴漏或排课冲突。
 4. **退费**类：给出笔数与金额；若金额为 0 但有笔数，明确提示「金额未体现在明细中，建议核对表单」。
 
 ## 3 个最值得关注的问题
@@ -491,7 +363,7 @@ router.post('/ai/monthly-report', async (req, res) => {
 
     console.log(
       `[AI] 生成月报：store=${storeName} month=${payload.month} ` +
-        `钉钉 ${dingtalk.totalCount} 笔 / ${dingtalk.categories.length} 类`
+        `钉钉 ${dingtalk.totalCount} 项 / ${dingtalk.categories.length} 类`
     );
 
     const mergedPayload = {
