@@ -12,8 +12,10 @@ const storeConfig = require('../services/storeConfig');
 const DINGTALK_APP_KEY = process.env.DINGTALK_APP_KEY;
 const DINGTALK_APP_SECRET = process.env.DINGTALK_APP_SECRET;
 
+/* ⭐ 未指定门店 → 默认归到「富贵园」 */
 const DEFAULT_STORE = '富贵园';
 
+/* ⭐ 门店名归一化：富贵园店 → 富贵园 */
 function normalizeStoreName(name) {
   const raw = name == null ? '' : String(name).trim();
   if (!raw) return '';
@@ -159,7 +161,6 @@ async function enrichOperationRecords(records) {
   }));
 }
 
-/* ⭐ 提取待办人：兼容 task_status / status 字段，以及 activity_id / userid / userId */
 async function extractPendingApprovers(tasks) {
   if (!Array.isArray(tasks) || tasks.length === 0) return [];
   const running = tasks.filter((t) => {
@@ -230,7 +231,7 @@ async function fetchProcessInstanceIds(processCode, startTime, endTime) {
 }
 
 /* ============================================================
- * ⭐ 表单字段提取（兼容空格、全角、括号）
+ * ⭐ 表单字段提取
  * ============================================================ */
 function normalizeKey(k) {
   return String(k || '')
@@ -278,7 +279,6 @@ function extractPayeeAccount(formValues) {
   return null;
 }
 
-/* ⭐ 明细列表解析：兼容 label 有「事项」/「内容」/「名称」/「用途」 */
 function parseDetailList(formValues) {
   const raw = formValues['明细列表'];
   if (!raw || raw === 'null') return [];
@@ -313,7 +313,6 @@ function parseDetailList(formValues) {
   }
 }
 
-/* ⭐ 金额提取：候选字段 + 明细累加 + 兼容全角/空格 */
 function extractAmount(formValues) {
   const nfv = buildNormalizedMap(formValues);
   const candidates = [
@@ -339,7 +338,6 @@ function extractAmount(formValues) {
     }
   }
 
-  /* 明细累加 */
   const rawDetail = formValues['明细列表'];
   if (typeof rawDetail === 'string' && rawDetail && rawDetail !== 'null') {
     try {
@@ -363,9 +361,6 @@ function extractAmount(formValues) {
   return null;
 }
 
-/* ============================================================
- * ⭐ 详情拉取：含 tasks / operation_records / form
- * ============================================================ */
 async function fetchInstanceDetail(instanceId) {
   const accessToken = await getAccessToken();
   const url = `https://oapi.dingtalk.com/topapi/processinstance/get?access_token=${accessToken}`;
@@ -380,16 +375,6 @@ async function fetchInstanceDetail(instanceId) {
     formValues[item.name] = item.value;
   });
 
-  /* ⭐ 打印字段名，便于排查 */
-  console.log('[DingTalk][detail]', instanceId, {
-    title: inst.title,
-    status: inst.status,
-    formKeys: Object.keys(formValues),
-    tasksLen: (inst.tasks || []).length,
-    tasksSample: (inst.tasks || []).slice(0, 2),
-    opLen: (inst.operation_records || []).length,
-  });
-
   const rawRecords = (inst.operation_records || []).map((rec) => ({
     userId: rec.userid || rec.userId || '',
     type: rec.type || '',
@@ -401,11 +386,6 @@ async function fetchInstanceDetail(instanceId) {
   const operationRecords = await enrichOperationRecords(rawRecords);
   const pendingApprovers = await extractPendingApprovers(inst.tasks || []);
 
-  const paymentUnit = extractPaymentUnit(formValues);
-  const payeeAccount = extractPayeeAccount(formValues);
-  const amount = extractAmount(formValues);
-  const items = parseDetailList(formValues);
-
   return {
     processInstanceId: instanceId,
     title: inst.title,
@@ -415,10 +395,10 @@ async function fetchInstanceDetail(instanceId) {
     finishTime: inst.finish_time,
     originatorUserId: inst.originator_userid,
     originatorDeptId: inst.originator_dept_id,
-    paymentUnit,
-    payeeAccount,
-    amount,
-    items,
+    paymentUnit: extractPaymentUnit(formValues),
+    payeeAccount: extractPayeeAccount(formValues),
+    amount: extractAmount(formValues),
+    items: parseDetailList(formValues),
     formValues,
     operationRecords,
     originatorName: inst.originator_name || '',
@@ -426,7 +406,9 @@ async function fetchInstanceDetail(instanceId) {
   };
 }
 
-/* ⭐ 统一：给一条记录补门店（手动 > 自动 > 文本推断 > 兜底富贵园） */
+/* ============================================================
+ * ⭐ 门店归属：手动 > 付款单位匹配 > 会员退费自动 > 文本推断 > 兜底富贵园
+ * ============================================================ */
 const STORE_KEYWORDS = {
   '哈德门': ['哈德门', '哈德', '崇文门', '国瑞'],
   '富贵园': ['富贵园', '富贵', '东花市'],
@@ -462,7 +444,9 @@ function inferStoreFromText(d) {
   return '';
 }
 
-function resolveStoreForItem(d, manualMap) {
+/* ⭐ 统一入口：给一条记录补门店（异步，因为要查门店配置） */
+async function resolveStoreForItem(d, manualMap) {
+  /* 1) 手动归属 */
   const manual = manualMap ? manualMap.get(d.processInstanceId) : undefined;
   if (manual) {
     return {
@@ -473,6 +457,20 @@ function resolveStoreForItem(d, manualMap) {
       fallback: false,
     };
   }
+
+  /* 2) ⭐ 付款单位匹配（走门店配置 paymentUnits，默认第一家） */
+  const byUnit = await storeConfig.resolveStoreByPaymentUnit(d.paymentUnit);
+  if (byUnit) {
+    return {
+      _storeName: byUnit,
+      _assignReason: '付款单位匹配',
+      _manualStore: false,
+      _autoAssigned: false,
+      fallback: false,
+    };
+  }
+
+  /* 3) 会员退费自动归属 */
   const r = dingtalkSync.resolveMemberRefundPaymentUnit(
     d.templateName,
     d.formValues || {},
@@ -488,6 +486,8 @@ function resolveStoreForItem(d, manualMap) {
       fallback: false,
     };
   }
+
+  /* 4) 文本关键字推断 */
   const inferred = inferStoreFromText(d);
   if (inferred) {
     return {
@@ -498,12 +498,51 @@ function resolveStoreForItem(d, manualMap) {
       fallback: false,
     };
   }
+
+  /* 5) 兜底富贵园 */
   return {
     _storeName: DEFAULT_STORE,
     _assignReason: '未指定兜底',
     _manualStore: false,
     _autoAssigned: false,
     fallback: true,
+  };
+}
+
+/* ⭐ 批量：给一批记录补门店，返回带计数的结果 */
+async function enrichWithStore(list, manualMap) {
+  let autoAssignedCount = 0;
+  let manualAssignedCount = 0;
+  let unitMatchedCount = 0;
+  let textInferredCount = 0;
+  let fallbackToDefaultCount = 0;
+
+  const enriched = await Promise.all(
+    list.map(async (d) => {
+      const info = await resolveStoreForItem(d, manualMap);
+      if (info._manualStore) manualAssignedCount++;
+      else if (info._assignReason === '付款单位匹配') unitMatchedCount++;
+      else if (info._assignReason === '文本推断') textInferredCount++;
+      else if (info._autoAssigned) autoAssignedCount++;
+      if (info.fallback) fallbackToDefaultCount++;
+
+      return {
+        ...d,
+        _autoAssigned: info._autoAssigned,
+        _storeName: info._storeName,
+        _assignReason: info._assignReason,
+        _manualStore: info._manualStore,
+      };
+    })
+  );
+
+  return {
+    enriched,
+    autoAssignedCount,
+    manualAssignedCount,
+    unitMatchedCount,
+    textInferredCount,
+    fallbackToDefaultCount,
   };
 }
 
@@ -516,7 +555,7 @@ function pickAmountSafe(d) {
 }
 
 /* ============================================================
- * 路由 1：获取所有审批模板
+ * 路由 1：模板列表 / 刷新
  * ============================================================ */
 router.get('/dingtalk/templates', async (req, res) => {
   try {
@@ -532,10 +571,8 @@ router.get('/dingtalk/templates', async (req, res) => {
   }
 });
 
-/* 路由 1.5：手动更新模板 */
 router.post('/dingtalk/templates/refresh', async (req, res) => {
   try {
-    console.log('[DingTalk] 开始从钉钉刷新模板列表…');
     const accessToken = await getAccessToken();
     const url = `https://oapi.dingtalk.com/topapi/process/listbyuserid?access_token=${accessToken}`;
     const response = await axios.post(url, { offset: 0, size: 100 });
@@ -556,7 +593,6 @@ router.post('/dingtalk/templates/refresh', async (req, res) => {
       data: { count: templates.length, templates, source: 'dingtalk' },
     });
   } catch (error) {
-    console.error('[DingTalk] 更新模板失败:', error.message);
     res.status(500).json({
       errorcode: 500,
       errormsg: error.response?.data?.errmsg || error.message || '更新失败',
@@ -564,7 +600,7 @@ router.post('/dingtalk/templates/refresh', async (req, res) => {
   }
 });
 
-/* 路由 2：单个模板拉取实例 ID */
+/* 路由 2：单个模板实例 ID */
 router.get('/dingtalk/process-list', async (req, res) => {
   try {
     const { start, end, processCode } = req.query;
@@ -597,13 +633,12 @@ router.get('/dingtalk/process-list', async (req, res) => {
       },
     });
   } catch (error) {
-    console.error('[DingTalk] 拉取失败:', error.message);
     res.status(500).json({ errorcode: 500, errormsg: error.message });
   }
 });
 
 /* ============================================================
- * 路由 3：报告接口（带 sync）
+ * 路由 3：报告接口
  * ============================================================ */
 router.get('/dingtalk/report', async (req, res) => {
   const t0 = Date.now();
@@ -659,7 +694,7 @@ router.get('/dingtalk/report', async (req, res) => {
       });
     }
 
-    /* 路径 A：只读缓存 */
+    /* ---------- 路径 A：只读缓存 ---------- */
     if (!needSync) {
       const processCodes = templates.map((t) => t.processCode);
       let cached = [];
@@ -681,25 +716,16 @@ router.get('/dingtalk/report', async (req, res) => {
         filtered.map((d) => d.processInstanceId).filter(Boolean)
       );
 
-      let autoAssignedCount = 0;
-      let manualAssignedCount = 0;
-      let fallbackToDefaultCount = 0;
+      const {
+        enriched,
+        autoAssignedCount,
+        manualAssignedCount,
+        unitMatchedCount,
+        textInferredCount,
+        fallbackToDefaultCount,
+      } = await enrichWithStore(filtered, manualMap);
 
-      filtered = filtered.map((d) => {
-        const info = resolveStoreForItem(d, manualMap);
-        if (info._manualStore) manualAssignedCount++;
-        else if (info._autoAssigned) autoAssignedCount++;
-        if (info.fallback) fallbackToDefaultCount++;
-        return {
-          ...d,
-          _autoAssigned: info._autoAssigned,
-          _storeName: info._storeName,
-          _assignReason: info._assignReason,
-          _manualStore: info._manualStore,
-        };
-      });
-
-      const results = filtered.map((d) => ({
+      const results = enriched.map((d) => ({
         templateName: d.templateName,
         processCode: d.processCode,
         processInstanceId: d.processInstanceId,
@@ -735,6 +761,8 @@ router.get('/dingtalk/report', async (req, res) => {
           totalCount: results.length,
           autoAssignedCount,
           manualAssignedCount,
+          unitMatchedCount,
+          textInferredCount,
           fallbackToDefaultCount,
           costMs: cost,
           results,
@@ -742,7 +770,7 @@ router.get('/dingtalk/report', async (req, res) => {
       });
     }
 
-    /* 路径 B：同步并查询 */
+    /* ---------- 路径 B：同步并查询 ---------- */
     try {
       await dingtalkSync.markRun('running', '手动同步并查询（触发中）');
     } catch (e) {
@@ -875,25 +903,16 @@ router.get('/dingtalk/report', async (req, res) => {
         filtered.map((d) => d.processInstanceId).filter(Boolean)
       );
 
-      let autoAssignedCount = 0;
-      let manualAssignedCount = 0;
-      let fallbackToDefaultCount = 0;
+      const {
+        enriched,
+        autoAssignedCount,
+        manualAssignedCount,
+        unitMatchedCount,
+        textInferredCount,
+        fallbackToDefaultCount,
+      } = await enrichWithStore(filtered, manualMap);
 
-      filtered = filtered.map((d) => {
-        const info = resolveStoreForItem(d, manualMap);
-        if (info._manualStore) manualAssignedCount++;
-        else if (info._autoAssigned) autoAssignedCount++;
-        if (info.fallback) fallbackToDefaultCount++;
-        return {
-          ...d,
-          _autoAssigned: info._autoAssigned,
-          _storeName: info._storeName,
-          _assignReason: info._assignReason,
-          _manualStore: info._manualStore,
-        };
-      });
-
-      const results = filtered.map((d) => ({
+      const results = enriched.map((d) => ({
         templateName: d.templateName,
         processCode: d.processCode,
         processInstanceId: d.processInstanceId,
@@ -940,6 +959,8 @@ router.get('/dingtalk/report', async (req, res) => {
           totalCount: results.length,
           autoAssignedCount,
           manualAssignedCount,
+          unitMatchedCount,
+          textInferredCount,
           fallbackToDefaultCount,
           costMs: cost,
           syncResult: {
@@ -951,7 +972,6 @@ router.get('/dingtalk/report', async (req, res) => {
         },
       });
     } catch (e) {
-      console.error('[DingTalk][report][sync] 失败:', e.message);
       let finishedAt = '';
       try {
         await dingtalkSync.markRun('failed', e.message);
@@ -1022,17 +1042,7 @@ router.get('/dingtalk/monthly-summary', async (req, res) => {
       cached.map((d) => d.processInstanceId).filter(Boolean)
     );
 
-    const enriched = cached.map((d) => {
-      const info = resolveStoreForItem(d, manualMap);
-      return {
-        ...d,
-        paymentUnit: d.paymentUnit,
-        _autoAssigned: info._autoAssigned,
-        _storeName: info._storeName,
-        _assignReason: info._assignReason,
-        _manualStore: info._manualStore,
-      };
-    });
+    const { enriched } = await enrichWithStore(cached, manualMap);
 
     /* 门店配置读写 */
     router.get('/store-config', async (req, res) => {
@@ -1059,30 +1069,10 @@ router.get('/dingtalk/monthly-summary', async (req, res) => {
     });
 
     const STORE_NAME = store ? normalizeStoreName(String(store).trim()) : '';
-    const STORE_UNIT_MAP = {
-      '哈德门': [
-        '北京林朗悦动体育管理有限公司',
-        '北京林朗体育管理有限公司',
-      ],
-      '富贵园': [
-        '北京林朗韵动体育管理有限公司',
-        '北京林朗体育管理有限公司东花市大街分公司',
-      ],
-    };
 
     let filtered = enriched;
-    if (STORE_NAME && STORE_UNIT_MAP[STORE_NAME]) {
-      const units = STORE_UNIT_MAP[STORE_NAME];
-      filtered = enriched.filter((d) => {
-        if (d._manualStore && d._storeName === STORE_NAME) return true;
-        if (d._storeName === STORE_NAME) return true;
-
-        const pu = String(d.paymentUnit || '').trim();
-        if (pu && units.some((u) => pu.includes(u) || u.includes(pu))) {
-          return true;
-        }
-        return false;
-      });
+    if (STORE_NAME) {
+      filtered = enriched.filter((d) => d._storeName === STORE_NAME);
       console.log(
         `[DingTalk][monthly] 门店过滤「${STORE_NAME}」：${enriched.length} → ${filtered.length}`
       );
@@ -1114,9 +1104,6 @@ router.get('/dingtalk/monthly-summary', async (req, res) => {
 
     const cost = Date.now() - t0;
     const totalAmount = results.reduce((s, r) => s + Number(r.amount || 0), 0);
-    console.log(
-      `[DingTalk][monthly] ${month}${STORE_NAME ? ' · ' + STORE_NAME : ''} 命中 ${results.length} 条 / ¥${totalAmount}，耗时 ${cost}ms`
-    );
 
     res.json({
       errorcode: 0,
@@ -1160,7 +1147,6 @@ router.post('/dingtalk/manual-store', async (req, res) => {
     );
     res.json({ errorcode: 0, errormsg: '保存成功', data: r });
   } catch (e) {
-    console.error('[DingTalk][manual-store] 保存失败', e.message);
     res.status(500).json({ errorcode: 500, errormsg: e.message });
   }
 });
@@ -1176,7 +1162,6 @@ router.delete('/dingtalk/manual-store', async (req, res) => {
     await manualStore.removeManualStore(processInstanceId);
     res.json({ errorcode: 0, errormsg: '已恢复自动归属' });
   } catch (e) {
-    console.error('[DingTalk][manual-store] 删除失败', e.message);
     res.status(500).json({ errorcode: 500, errormsg: e.message });
   }
 });

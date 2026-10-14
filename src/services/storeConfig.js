@@ -1,7 +1,16 @@
 /* ============================================================
  * ⭐ 门店配置：MySQL 读写 + 匹配工具
+ *   - 门店名统一归一化：去掉结尾的「店」
+ *   - 付款单位 → 门店（按 paymentUnits 顺序匹配，默认第一家）
  * ============================================================ */
 const { pool } = require('../db');
+
+/* ⭐ 门店名归一化：富贵园店 → 富贵园 */
+function normalizeStoreName(name) {
+  const raw = name == null ? '' : String(name).trim();
+  if (!raw) return '';
+  return raw.replace(/店$/, '').trim();
+}
 
 /* ---------- 默认数据（首次访问时兜底） ---------- */
 const DEFAULT_STORES = [
@@ -31,7 +40,7 @@ const DEFAULT_STORES = [
   },
 ];
 
-/* ---------- 从数据库读取 ---------- */
+/* ---------- 从数据库读取（归一化名字） ---------- */
 async function listStores() {
   try {
     const [rows] = await pool.query(
@@ -40,15 +49,20 @@ async function listStores() {
         ORDER BY sort_order ASC, id ASC`
     );
     if (!rows || rows.length === 0) return DEFAULT_STORES;
-    return rows.map((r) => ({
-      id: r.id,
-      name: r.name,
-      shortName: r.short_name || r.name,
-      paymentUnits: safeParseArray(r.payment_units),
-      keywords: safeParseArray(r.keywords),
-      isDefault: !!r.is_default,
-      sortOrder: r.sort_order || 0,
-    }));
+    return rows.map((r) => {
+      const cleanName = normalizeStoreName(r.name) || r.name;
+      const cleanShort =
+        normalizeStoreName(r.short_name || r.name) || r.short_name || cleanName;
+      return {
+        id: r.id,
+        name: cleanName,
+        shortName: cleanShort,
+        paymentUnits: safeParseArray(r.payment_units),
+        keywords: safeParseArray(r.keywords),
+        isDefault: !!r.is_default,
+        sortOrder: r.sort_order || 0,
+      };
+    });
   } catch (e) {
     console.warn('[storeConfig] 读取失败，使用默认配置：', e.message);
     return DEFAULT_STORES;
@@ -66,7 +80,7 @@ function safeParseArray(v) {
   }
 }
 
-/* ---------- 保存（整体替换） ---------- */
+/* ---------- 保存（整体替换，写入归一化名字） ---------- */
 async function saveStores(list) {
   if (!Array.isArray(list)) throw new Error('stores 必须是数组');
 
@@ -74,20 +88,24 @@ async function saveStores(list) {
   try {
     await conn.beginTransaction();
 
-    /* 清空并重写（门店数量少，简单粗暴） */
     await conn.query(`DELETE FROM gym_store_config`);
 
     let i = 1;
     for (const s of list) {
       if (!s?.id || !s?.name) continue;
+
+      const cleanName = normalizeStoreName(s.name) || String(s.name);
+      const cleanShort =
+        normalizeStoreName(s.shortName || s.name) || cleanName;
+
       await conn.query(
         `INSERT INTO gym_store_config
            (id, name, short_name, payment_units, keywords, is_default, sort_order)
          VALUES (?, ?, ?, ?, ?, ?, ?)`,
         [
           String(s.id),
-          String(s.name),
-          String(s.shortName || s.name),
+          cleanName,
+          cleanShort,
           JSON.stringify(Array.isArray(s.paymentUnits) ? s.paymentUnits : []),
           JSON.stringify(Array.isArray(s.keywords) ? s.keywords : []),
           s.isDefault ? 1 : 0,
@@ -105,31 +123,47 @@ async function saveStores(list) {
   }
 }
 
-/* ---------- 匹配工具 ---------- */
-async function matchStoreByPaymentUnit(paymentUnit) {
+/* ============================================================
+ * ⭐ 付款单位 → 门店（按门店配置 paymentUnits 顺序匹配）
+ *   1) 精确匹配
+ *   2) 双向包含
+ *   3) 门店名 / shortName 出现在付款单位里
+ *   返回归一化后的门店名
+ * ============================================================ */
+async function resolveStoreByPaymentUnit(paymentUnit) {
   const raw = paymentUnit == null ? '' : String(paymentUnit).trim();
   if (!raw) return '';
   const stores = await listStores();
 
-  /* 精确 */
+  /* 1) 精确匹配 */
   for (const s of stores) {
     for (const u of s.paymentUnits) {
-      if (raw === u) return s.name;
+      if (raw === u) return normalizeStoreName(s.name) || s.name;
     }
   }
-  /* 双向包含 */
+
+  /* 2) 双向包含（按门店顺序，第一家命中即返回） */
   for (const s of stores) {
     for (const u of s.paymentUnits) {
-      if (raw.includes(u) || u.includes(raw)) return s.name;
+      if (raw.includes(u) || u.includes(raw)) {
+        return normalizeStoreName(s.name) || s.name;
+      }
     }
   }
-  /* 门店名直接出现在付款单位里 */
+
+  /* 3) 门店名出现在付款单位里 */
   for (const s of stores) {
-    if (raw.includes(s.name) || raw.includes(s.shortName)) return s.name;
+    const name = normalizeStoreName(s.name) || s.name;
+    const short = normalizeStoreName(s.shortName || s.name) || s.shortName;
+    if (raw.includes(name) || (short && raw.includes(short))) {
+      return name;
+    }
   }
+
   return '';
 }
 
+/* ---------- 文本 → 门店（关键字靠前优先） ---------- */
 async function matchStoreByText(text) {
   const t = text == null ? '' : String(text);
   if (!t) return '';
@@ -143,15 +177,16 @@ async function matchStoreByText(text) {
       const idx = t.indexOf(k);
       if (idx !== -1 && idx < bestIdx) {
         bestIdx = idx;
-        bestStore = s.name;
+        bestStore = normalizeStoreName(s.name) || s.name;
       }
     }
   }
   return bestStore;
 }
 
+/* ---------- 一条记录 → 门店（先付款单位，再文本） ---------- */
 async function matchStoreByItem(item) {
-  const byUnit = await matchStoreByPaymentUnit(item?.paymentUnit);
+  const byUnit = await resolveStoreByPaymentUnit(item?.paymentUnit);
   if (byUnit) return byUnit;
 
   const parts = [];
@@ -193,9 +228,16 @@ async function matchStoreByItem(item) {
   return matchStoreByText(parts.join(' '));
 }
 
+/* ---------- 兼容旧名 ---------- */
+async function matchStoreByPaymentUnit(paymentUnit) {
+  return resolveStoreByPaymentUnit(paymentUnit);
+}
+
 module.exports = {
   listStores,
   saveStores,
+  normalizeStoreName,
+  resolveStoreByPaymentUnit,   /* ⭐ 新增：付款单位 → 门店 */
   matchStoreByPaymentUnit,
   matchStoreByText,
   matchStoreByItem,
