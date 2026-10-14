@@ -407,13 +407,49 @@ async function fetchInstanceDetail(instanceId) {
 }
 
 /* ============================================================
- * ⭐ 门店归属：手动 > 付款单位匹配 > 会员退费自动 > 文本推断 > 兜底富贵园
+ * ⭐ 门店归属决策链
+ *   1) 有 paymentUnit → 找所属门店
+ *   2) 无 paymentUnit，但有门店字段 → 该门店下按有效时间段选公司
+ *   3) 无 paymentUnit，无门店字段 → 事项/明细匹配门店 → 回到第 2 步
+ *   4) 都没命中 → 手动归属
  * ============================================================ */
 const STORE_KEYWORDS = {
   '哈德门': ['哈德门', '哈德', '崇文门', '国瑞'],
   '富贵园': ['富贵园', '富贵', '东花市'],
 };
 
+/* ⭐ 从记录里提取「门店字段」 */
+function extractStoreField(d) {
+  const fv = d.formValues || {};
+  const normKey = (k) =>
+    String(k || '')
+      .replace(/\s+/g, '')
+      .replace(/（/g, '(')
+      .replace(/）/g, ')');
+  const nfv = {};
+  Object.keys(fv).forEach((k) => {
+    nfv[normKey(k)] = fv[k];
+  });
+
+  const candidates = ['门店', '门店名称', '所属门店', '店面', '店名'];
+  for (const c of candidates) {
+    const v = nfv[normKey(c)];
+    if (v != null && v !== 'null' && v !== '') {
+      return String(v).trim();
+    }
+  }
+  const key = Object.keys(fv).find((k) => {
+    const n = normKey(k);
+    return n.includes('门店') && !n.includes('付款') && !n.includes('收款');
+  });
+  if (key) {
+    const v = fv[key];
+    if (v != null && v !== 'null' && v !== '') return String(v).trim();
+  }
+  return '';
+}
+
+/* ⭐ 文本推断门店 */
 function inferStoreFromText(d) {
   const parts = [];
   if (Array.isArray(d.items)) {
@@ -444,13 +480,27 @@ function inferStoreFromText(d) {
   return '';
 }
 
-/* ⭐ 统一入口：给一条记录补门店（异步，因为要查门店配置） */
+/* ⭐ 统一入口：给一条记录补门店 + 公司 */
 async function resolveStoreForItem(d, manualMap) {
+  const atDate = d.createTime || null;
+
   /* 1) 手动归属 */
   const manual = manualMap ? manualMap.get(d.processInstanceId) : undefined;
   if (manual) {
+    const manualCompany =
+      typeof manual === 'string' ? manual : manual.company || '';
+    const manualStoreName =
+      typeof manual === 'object' && manual.storeName
+        ? normalizeStoreName(manual.storeName) || manual.storeName
+        : '';
+
+    let storeName = manualStoreName;
+    if (!storeName && manualCompany) {
+      storeName = await storeConfig.resolveStoreByPaymentUnit(manualCompany);
+    }
     return {
-      _storeName: normalizeStoreName(manual) || manual,
+      _storeName: storeName || DEFAULT_STORE,
+      _company: manualCompany || null,
       _assignReason: '手动归属',
       _manualStore: true,
       _autoAssigned: false,
@@ -458,50 +508,72 @@ async function resolveStoreForItem(d, manualMap) {
     };
   }
 
-  /* 2) ⭐ 付款单位匹配（走门店配置 paymentUnits，默认第一家） */
-  const byUnit = await storeConfig.resolveStoreByPaymentUnit(d.paymentUnit);
-  if (byUnit) {
+  /* 2) 有付款公司名称 → 找所属门店 */
+  if (d.paymentUnit && String(d.paymentUnit).trim()) {
+    const byUnit = await storeConfig.resolveStoreByPaymentUnit(d.paymentUnit);
+    if (byUnit) {
+      return {
+        _storeName: byUnit,
+        _company: String(d.paymentUnit).trim(),
+        _assignReason: '付款单位匹配',
+        _manualStore: false,
+        _autoAssigned: false,
+        fallback: false,
+      };
+    }
+  }
+
+  /* 3) 无付款公司名称，但有门店字段 → 门店下按有效时间段选公司 */
+  const storeField = extractStoreField(d);
+  if (storeField) {
+    const cleanStore = normalizeStoreName(storeField) || storeField;
+    const companyInfo = await storeConfig.resolveCompanyInStore(
+      cleanStore,
+      atDate
+    );
+    if (companyInfo) {
+      return {
+        _storeName: cleanStore,
+        _company: companyInfo.company,
+        _assignReason: '门店字段 + 有效时间段',
+        _manualStore: false,
+        _autoAssigned: false,
+        fallback: !!companyInfo.fallback,
+      };
+    }
+  }
+
+  /* 4) 事项/明细里匹配门店关键字 → 回到第 3 步 */
+  const inferredStore = inferStoreFromText(d);
+  if (inferredStore) {
+    const companyInfo = await storeConfig.resolveCompanyInStore(
+      inferredStore,
+      atDate
+    );
+    if (companyInfo) {
+      return {
+        _storeName: normalizeStoreName(inferredStore) || inferredStore,
+        _company: companyInfo.company,
+        _assignReason: '文本关键字 + 有效时间段',
+        _manualStore: false,
+        _autoAssigned: false,
+        fallback: !!companyInfo.fallback,
+      };
+    }
     return {
-      _storeName: byUnit,
-      _assignReason: '付款单位匹配',
+      _storeName: normalizeStoreName(inferredStore) || inferredStore,
+      _company: null,
+      _assignReason: '文本关键字（无公司）',
       _manualStore: false,
       _autoAssigned: false,
-      fallback: false,
+      fallback: true,
     };
   }
 
-  /* 3) 会员退费自动归属 */
-  const r = dingtalkSync.resolveMemberRefundPaymentUnit(
-    d.templateName,
-    d.formValues || {},
-    d.paymentUnit,
-    d.createTime
-  );
-  if (r.storeName) {
-    return {
-      _storeName: normalizeStoreName(r.storeName) || r.storeName,
-      _assignReason: r.reason || '自动归属',
-      _manualStore: false,
-      _autoAssigned: !!r.autoAssigned,
-      fallback: false,
-    };
-  }
-
-  /* 4) 文本关键字推断 */
-  const inferred = inferStoreFromText(d);
-  if (inferred) {
-    return {
-      _storeName: normalizeStoreName(inferred) || inferred,
-      _assignReason: '文本推断',
-      _manualStore: false,
-      _autoAssigned: false,
-      fallback: false,
-    };
-  }
-
-  /* 5) 兜底富贵园 */
+  /* 5) 都没命中 → 兜底富贵园 */
   return {
     _storeName: DEFAULT_STORE,
+    _company: null,
     _assignReason: '未指定兜底',
     _manualStore: false,
     _autoAssigned: false,
@@ -509,20 +581,23 @@ async function resolveStoreForItem(d, manualMap) {
   };
 }
 
-/* ⭐ 批量：给一批记录补门店，返回带计数的结果 */
+/* ⭐ 批量 */
 async function enrichWithStore(list, manualMap) {
   let autoAssignedCount = 0;
   let manualAssignedCount = 0;
   let unitMatchedCount = 0;
+  let storeFieldCount = 0;
   let textInferredCount = 0;
   let fallbackToDefaultCount = 0;
 
   const enriched = await Promise.all(
     list.map(async (d) => {
       const info = await resolveStoreForItem(d, manualMap);
+
       if (info._manualStore) manualAssignedCount++;
       else if (info._assignReason === '付款单位匹配') unitMatchedCount++;
-      else if (info._assignReason === '文本推断') textInferredCount++;
+      else if (info._assignReason === '门店字段 + 有效时间段') storeFieldCount++;
+      else if (info._assignReason === '文本关键字 + 有效时间段') textInferredCount++;
       else if (info._autoAssigned) autoAssignedCount++;
       if (info.fallback) fallbackToDefaultCount++;
 
@@ -530,6 +605,7 @@ async function enrichWithStore(list, manualMap) {
         ...d,
         _autoAssigned: info._autoAssigned,
         _storeName: info._storeName,
+        _company: info._company,
         _assignReason: info._assignReason,
         _manualStore: info._manualStore,
       };
@@ -541,6 +617,7 @@ async function enrichWithStore(list, manualMap) {
     autoAssignedCount,
     manualAssignedCount,
     unitMatchedCount,
+    storeFieldCount,
     textInferredCount,
     fallbackToDefaultCount,
   };
@@ -721,6 +798,7 @@ router.get('/dingtalk/report', async (req, res) => {
         autoAssignedCount,
         manualAssignedCount,
         unitMatchedCount,
+        storeFieldCount,
         textInferredCount,
         fallbackToDefaultCount,
       } = await enrichWithStore(filtered, manualMap);
@@ -745,6 +823,7 @@ router.get('/dingtalk/report', async (req, res) => {
         error: d.error,
         _autoAssigned: d._autoAssigned === true,
         _storeName: d._storeName || null,
+        _company: d._company || null,
         _assignReason: d._assignReason || '',
         _manualStore: d._manualStore === true,
       }));
@@ -762,6 +841,7 @@ router.get('/dingtalk/report', async (req, res) => {
           autoAssignedCount,
           manualAssignedCount,
           unitMatchedCount,
+          storeFieldCount,
           textInferredCount,
           fallbackToDefaultCount,
           costMs: cost,
@@ -908,6 +988,7 @@ router.get('/dingtalk/report', async (req, res) => {
         autoAssignedCount,
         manualAssignedCount,
         unitMatchedCount,
+        storeFieldCount,
         textInferredCount,
         fallbackToDefaultCount,
       } = await enrichWithStore(filtered, manualMap);
@@ -932,6 +1013,7 @@ router.get('/dingtalk/report', async (req, res) => {
         error: d.error,
         _autoAssigned: d._autoAssigned === true,
         _storeName: d._storeName || null,
+        _company: d._company || null,
         _assignReason: d._assignReason || '',
         _manualStore: d._manualStore === true,
       }));
@@ -960,6 +1042,7 @@ router.get('/dingtalk/report', async (req, res) => {
           autoAssignedCount,
           manualAssignedCount,
           unitMatchedCount,
+          storeFieldCount,
           textInferredCount,
           fallbackToDefaultCount,
           costMs: cost,
@@ -1044,30 +1127,6 @@ router.get('/dingtalk/monthly-summary', async (req, res) => {
 
     const { enriched } = await enrichWithStore(cached, manualMap);
 
-    /* 门店配置读写 */
-    router.get('/store-config', async (req, res) => {
-      try {
-        const stores = await storeConfig.listStores();
-        res.json({ errorcode: 0, errormsg: '获取成功', data: { stores } });
-      } catch (e) {
-        res.status(500).json({ errorcode: 500, errormsg: e.message });
-      }
-    });
-
-    router.post('/store-config', async (req, res) => {
-      try {
-        const stores = req.body?.stores;
-        if (!Array.isArray(stores)) {
-          return res.status(400).json({ errorcode: 400, errormsg: '缺少 stores 数组' });
-        }
-        await storeConfig.saveStores(stores);
-        const list = await storeConfig.listStores();
-        res.json({ errorcode: 0, errormsg: '保存成功', data: { stores: list } });
-      } catch (e) {
-        res.status(500).json({ errorcode: 500, errormsg: e.message });
-      }
-    });
-
     const STORE_NAME = store ? normalizeStoreName(String(store).trim()) : '';
 
     let filtered = enriched;
@@ -1098,6 +1157,7 @@ router.get('/dingtalk/monthly-summary', async (req, res) => {
       error: d.error,
       _autoAssigned: d._autoAssigned === true,
       _storeName: d._storeName || null,
+      _company: d._company || null,
       _assignReason: d._assignReason || '',
       _manualStore: d._manualStore === true,
     }));
@@ -1130,7 +1190,33 @@ router.get('/dingtalk/monthly-summary', async (req, res) => {
 });
 
 /* ============================================================
- * 路由 7：手动归属门店
+ * 路由 7：门店配置（读 / 写）
+ * ============================================================ */
+router.get('/dingtalk/store-config', async (req, res) => {
+  try {
+    const stores = await storeConfig.listStores();
+    res.json({ errorcode: 0, errormsg: '获取成功', data: { stores } });
+  } catch (e) {
+    res.status(500).json({ errorcode: 500, errormsg: e.message });
+  }
+});
+
+router.post('/dingtalk/store-config', async (req, res) => {
+  try {
+    const stores = req.body?.stores;
+    if (!Array.isArray(stores)) {
+      return res.status(400).json({ errorcode: 400, errormsg: '缺少 stores 数组' });
+    }
+    await storeConfig.saveStores(stores);
+    const list = await storeConfig.listStores();
+    res.json({ errorcode: 0, errormsg: '保存成功', data: { stores: list } });
+  } catch (e) {
+    res.status(500).json({ errorcode: 500, errormsg: e.message });
+  }
+});
+
+/* ============================================================
+ * 路由 8：手动归属门店
  * ============================================================ */
 router.post('/dingtalk/manual-store', async (req, res) => {
   try {
