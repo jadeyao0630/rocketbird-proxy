@@ -33,12 +33,13 @@ const VALID_PERMISSIONS = new Set([
   'simulation:course',
   /* 薪酬佣金计算 */
   'payroll:calc',
+  'payroll:settle',
   'ops:view',
   'export:payroll',
   'export:personal',
-  'report:marketing:view',      // ⭐ 新增
-  'report:monthly:view',        // ⭐ 新增
-  'report:dingtalk:view',     
+  'report:marketing:view',
+  'report:monthly:view',
+  'report:dingtalk:view',
   /* 综合设置 */
   'user:add',
   'user:resetPwd',

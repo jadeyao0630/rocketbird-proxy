@@ -20,6 +20,8 @@ const dingtalkRoutes = require('./routes/dingtalk');
 const aiRoutes = require('./routes/ai');
 const monthlySummaryRoutes = require('./routes/monthlySummary');
 const dingtalkSyncConfigRoutes = require('./routes/dingtalkSyncConfig');
+const payrollDetailRoutes = require('./routes/payrollDetail');
+const payrollSettlementRoutes = require('./routes/payrollSettlement');
 
 /* ⭐ 钉钉定时同步 */
 const { startDingTalkSync } = require('./services/dingtalkSync');
@@ -72,6 +74,8 @@ app.use('/api', dingtalkRoutes);
 app.use('/api', aiRoutes);
 app.use('/api', monthlySummaryRoutes);
 app.use('/api', dingtalkSyncConfigRoutes);
+app.use('/api', payrollDetailRoutes);
+app.use('/api', payrollSettlementRoutes);
 
 /* 健康检查 */
 app.get('/health', (req, res) => {

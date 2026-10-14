@@ -286,6 +286,53 @@ async function ensureTables() {
       created_at    DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
       updated_at    DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`,
+    
+    /* ⭐ 销售明细自定义提点 */
+    `CREATE TABLE IF NOT EXISTS payroll_sales_detail (
+      id          BIGINT PRIMARY KEY AUTO_INCREMENT,
+      bus_id      VARCHAR(64)  NOT NULL,
+      month       VARCHAR(7)   NOT NULL,
+      staff_id    VARCHAR(64)  NOT NULL,
+      order_id    VARCHAR(64)  NOT NULL,
+      mode        VARCHAR(16)  DEFAULT NULL,
+      value       DECIMAL(12,4) DEFAULT NULL,
+      updated_by  VARCHAR(64)  DEFAULT NULL,
+      updated_at  DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+      UNIQUE KEY uk_bus_month_staff_order (bus_id, month, staff_id, order_id),
+      KEY idx_bus_month (bus_id, month)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`,
+
+    /* ⭐ 消课明细自定义课提 */
+    `CREATE TABLE IF NOT EXISTS payroll_class_detail (
+      id          BIGINT PRIMARY KEY AUTO_INCREMENT,
+      bus_id      VARCHAR(64)  NOT NULL,
+      month       VARCHAR(7)   NOT NULL,
+      staff_id    VARCHAR(64)  NOT NULL,
+      course_name VARCHAR(64)  NOT NULL,
+      member_id   VARCHAR(64)  NOT NULL DEFAULT '',
+      mode        VARCHAR(16)  DEFAULT NULL,
+      value       DECIMAL(12,4) DEFAULT NULL,
+      updated_by  VARCHAR(64)  DEFAULT NULL,
+      updated_at  DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+      UNIQUE KEY uk_bus_month_staff_class (bus_id, month, staff_id, course_name, member_id),
+      KEY idx_bus_month (bus_id, month)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`,
+     
+    /* ⭐ 薪酬结算快照 */
+    `CREATE TABLE IF NOT EXISTS payroll_settlement (
+      id            BIGINT PRIMARY KEY AUTO_INCREMENT,
+      bus_id        VARCHAR(64)  NOT NULL,
+      month         VARCHAR(7)   NOT NULL,
+      status        VARCHAR(16)  NOT NULL DEFAULT 'settled',
+      plan_hash     VARCHAR(64)  DEFAULT NULL,
+      results_json  LONGTEXT     NOT NULL,
+      summary_json  LONGTEXT     DEFAULT NULL,
+      settled_by    VARCHAR(64)  DEFAULT NULL,
+      settled_at    DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      updated_at    DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+      UNIQUE KEY uk_bus_month (bus_id, month),
+      KEY idx_bus_month (bus_id, month)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`,
   ];
 
   for (const sql of sqls) {
