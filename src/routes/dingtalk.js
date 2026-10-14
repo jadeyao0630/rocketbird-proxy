@@ -7,9 +7,18 @@ const router = express.Router();
 const cache = require('../services/dingtalkCache');
 const dingtalkSync = require('../services/dingtalkSync');
 const manualStore = require('../services/manualStore');
+const storeConfig = require('../services/storeConfig');
 
 const DINGTALK_APP_KEY = process.env.DINGTALK_APP_KEY;
 const DINGTALK_APP_SECRET = process.env.DINGTALK_APP_SECRET;
+
+const DEFAULT_STORE = '富贵园';
+
+function normalizeStoreName(name) {
+  const raw = name == null ? '' : String(name).trim();
+  if (!raw) return '';
+  return raw.replace(/店$/, '').trim();
+}
 
 if (!DINGTALK_APP_KEY || !DINGTALK_APP_SECRET) {
   console.warn(
@@ -150,15 +159,17 @@ async function enrichOperationRecords(records) {
   }));
 }
 
+/* ⭐ 提取待办人：兼容 task_status / status 字段，以及 activity_id / userid / userId */
 async function extractPendingApprovers(tasks) {
   if (!Array.isArray(tasks) || tasks.length === 0) return [];
-  const running = tasks.filter(
-    (t) => String(t.task_status || '').toUpperCase() === 'RUNNING'
-  );
+  const running = tasks.filter((t) => {
+    const s = String(t.task_status || t.status || '').toUpperCase();
+    return s === 'RUNNING' || s === 'RUNNING_TASK';
+  });
   const result = [];
   const seen = new Set();
   for (const t of running) {
-    const uid = t.userid || '';
+    const uid = t.userid || t.userId || t.user_id || '';
     if (!uid || seen.has(uid)) continue;
     seen.add(uid);
     const name = await fetchUserName(uid);
@@ -218,19 +229,35 @@ async function fetchProcessInstanceIds(processCode, startTime, endTime) {
   return allIds;
 }
 
-function extractPaymentUnit(formValues) {
-  const keys = Object.keys(formValues);
-  const norm = (k) => String(k).replace(/[\s\t]+/g, '');
-  const normalizedMap = {};
-  keys.forEach((k) => {
-    normalizedMap[norm(k)] = formValues[k];
+/* ============================================================
+ * ⭐ 表单字段提取（兼容空格、全角、括号）
+ * ============================================================ */
+function normalizeKey(k) {
+  return String(k || '')
+    .replace(/\s+/g, '')
+    .replace(/（/g, '(')
+    .replace(/）/g, ')')
+    .replace(/：/g, ':');
+}
+
+function buildNormalizedMap(formValues) {
+  const out = {};
+  Object.keys(formValues || {}).forEach((k) => {
+    out[normalizeKey(k)] = formValues[k];
   });
+  return out;
+}
+
+function extractPaymentUnit(formValues) {
+  const nfv = buildNormalizedMap(formValues);
   const candidates = ['付款单位全称', '付款单位', '付款公司', '付款主体', '付款方'];
   for (const c of candidates) {
-    if (normalizedMap[c] !== undefined) return normalizedMap[c];
+    const v = nfv[normalizeKey(c)];
+    if (v != null && v !== 'null' && v !== '') return v;
   }
+  const keys = Object.keys(formValues || {});
   const fuzzy = keys.find((k) => {
-    const n = norm(k);
+    const n = normalizeKey(k);
     return (
       n.includes('付款单位') ||
       n.includes('付款公司') ||
@@ -242,19 +269,16 @@ function extractPaymentUnit(formValues) {
 }
 
 function extractPayeeAccount(formValues) {
-  const keys = Object.keys(formValues);
-  const norm = (k) => String(k).replace(/[\s\t]+/g, '');
-  const normalizedMap = {};
-  keys.forEach((k) => {
-    normalizedMap[norm(k)] = formValues[k];
-  });
-  const candidates = ['收款账户', '收款人', '收款方', '收款单位'];
+  const nfv = buildNormalizedMap(formValues);
+  const candidates = ['收款账户', '收款人', '收款方', '收款单位', '收款账号'];
   for (const c of candidates) {
-    if (normalizedMap[c] !== undefined) return normalizedMap[c];
+    const v = nfv[normalizeKey(c)];
+    if (v != null && v !== 'null' && v !== '') return v;
   }
   return null;
 }
 
+/* ⭐ 明细列表解析：兼容 label 有「事项」/「内容」/「名称」/「用途」 */
 function parseDetailList(formValues) {
   const raw = formValues['明细列表'];
   if (!raw || raw === 'null') return [];
@@ -265,9 +289,22 @@ function parseDetailList(formValues) {
       const rowValue = row.rowValue || [];
       const item = { rowNumber: row.rowNumber || '', content: '', amount: '' };
       rowValue.forEach((f) => {
-        if (f.label === '事项') item.content = String(f.value || '');
-        else if (f.label === '金额（元）' || f.label === '金额')
-          item.amount = String(f.value || '');
+        const label = String(f.label || '');
+        const val = f.value;
+        if (val == null || val === 'null' || val === '') return;
+        if (
+          label.includes('事项') ||
+          label.includes('内容') ||
+          label.includes('名称') ||
+          label.includes('用途')
+        ) {
+          item.content = item.content
+            ? `${item.content}；${val}`
+            : String(val);
+        }
+        if (label.includes('金额')) {
+          item.amount = String(val);
+        }
       });
       return item;
     });
@@ -276,33 +313,59 @@ function parseDetailList(formValues) {
   }
 }
 
+/* ⭐ 金额提取：候选字段 + 明细累加 + 兼容全角/空格 */
 function extractAmount(formValues) {
-  const norm = (k) => String(k).replace(/[\s\t]+/g, '');
-  const normalizedMap = {};
-  Object.keys(formValues).forEach((k) => {
-    normalizedMap[norm(k)] = formValues[k];
-  });
+  const nfv = buildNormalizedMap(formValues);
   const candidates = [
-    '补退金额（元）',
-    '借款金额（元）',
-    '本次申请支付金额（元）',
-    '报销金额',
-    '总价款（元）',
-    '金额（元）',
+    '补退金额(元)', '补退金额',
+    '退款金额(元)', '退款金额',
+    '实退金额(元)', '实退金额',
+    '应退金额(元)', '应退金额',
+    '退费金额(元)', '退费金额',
+    '借款金额(元)', '借款金额',
+    '报销金额(元)', '报销金额',
+    '备用金金额(元)', '备用金金额',
+    '本次申请支付金额(元)', '本次申请支付金额',
+    '付款金额(元)', '付款金额',
+    '总价款(元)', '总价款',
+    '金额(元)', '金额',
+    '合计(元)', '合计',
   ];
   for (const c of candidates) {
-    const key = norm(c);
-    if (
-      normalizedMap[key] !== undefined &&
-      normalizedMap[key] !== 'null' &&
-      normalizedMap[key] !== ''
-    ) {
-      return normalizedMap[key];
+    const v = nfv[normalizeKey(c)];
+    if (v != null && v !== 'null' && v !== '') {
+      const n = Number(String(v).replace(/[^\d.-]/g, ''));
+      if (Number.isFinite(n) && n !== 0) return n;
     }
   }
+
+  /* 明细累加 */
+  const rawDetail = formValues['明细列表'];
+  if (typeof rawDetail === 'string' && rawDetail && rawDetail !== 'null') {
+    try {
+      const parsed = JSON.parse(rawDetail);
+      if (Array.isArray(parsed)) {
+        let sum = 0;
+        parsed.forEach((row) => {
+          (row?.rowValue || []).forEach((f) => {
+            const label = String(f?.label || '');
+            if (label.includes('金额')) {
+              const n = Number(String(f?.value || '').replace(/[^\d.-]/g, ''));
+              if (Number.isFinite(n)) sum += n;
+            }
+          });
+        });
+        if (sum !== 0) return sum;
+      }
+    } catch { /* ignore */ }
+  }
+
   return null;
 }
 
+/* ============================================================
+ * ⭐ 详情拉取：含 tasks / operation_records / form
+ * ============================================================ */
 async function fetchInstanceDetail(instanceId) {
   const accessToken = await getAccessToken();
   const url = `https://oapi.dingtalk.com/topapi/processinstance/get?access_token=${accessToken}`;
@@ -317,8 +380,18 @@ async function fetchInstanceDetail(instanceId) {
     formValues[item.name] = item.value;
   });
 
+  /* ⭐ 打印字段名，便于排查 */
+  console.log('[DingTalk][detail]', instanceId, {
+    title: inst.title,
+    status: inst.status,
+    formKeys: Object.keys(formValues),
+    tasksLen: (inst.tasks || []).length,
+    tasksSample: (inst.tasks || []).slice(0, 2),
+    opLen: (inst.operation_records || []).length,
+  });
+
   const rawRecords = (inst.operation_records || []).map((rec) => ({
-    userId: rec.userid || '',
+    userId: rec.userid || rec.userId || '',
     type: rec.type || '',
     result: rec.result || '',
     date: rec.date || null,
@@ -327,6 +400,11 @@ async function fetchInstanceDetail(instanceId) {
 
   const operationRecords = await enrichOperationRecords(rawRecords);
   const pendingApprovers = await extractPendingApprovers(inst.tasks || []);
+
+  const paymentUnit = extractPaymentUnit(formValues);
+  const payeeAccount = extractPayeeAccount(formValues);
+  const amount = extractAmount(formValues);
+  const items = parseDetailList(formValues);
 
   return {
     processInstanceId: instanceId,
@@ -337,15 +415,104 @@ async function fetchInstanceDetail(instanceId) {
     finishTime: inst.finish_time,
     originatorUserId: inst.originator_userid,
     originatorDeptId: inst.originator_dept_id,
-    paymentUnit: extractPaymentUnit(formValues),
-    payeeAccount: extractPayeeAccount(formValues),
-    amount: extractAmount(formValues),
-    items: parseDetailList(formValues),
+    paymentUnit,
+    payeeAccount,
+    amount,
+    items,
     formValues,
     operationRecords,
     originatorName: inst.originator_name || '',
     pendingApprovers,
   };
+}
+
+/* ⭐ 统一：给一条记录补门店（手动 > 自动 > 文本推断 > 兜底富贵园） */
+const STORE_KEYWORDS = {
+  '哈德门': ['哈德门', '哈德', '崇文门', '国瑞'],
+  '富贵园': ['富贵园', '富贵', '东花市'],
+};
+
+function inferStoreFromText(d) {
+  const parts = [];
+  if (Array.isArray(d.items)) {
+    d.items.forEach((it) => {
+      if (it?.content) parts.push(String(it.content));
+    });
+  }
+  const fv = d.formValues || {};
+  [
+    '付款内容提要', '借款提要', '事项', '事项/明细', '报销事由',
+    '费用类型', '明细', '备注', '用途', '摘要', '事由', '说明',
+  ].forEach((k) => {
+    const v = fv[k];
+    if (v == null || v === 'null' || v === '') return;
+    if (typeof v === 'object') {
+      try { parts.push(JSON.stringify(v)); } catch {}
+    } else {
+      parts.push(String(v));
+    }
+  });
+  if (d.title) parts.push(String(d.title));
+
+  const text = parts.join(' ');
+  if (!text) return '';
+  for (const [storeName, kws] of Object.entries(STORE_KEYWORDS)) {
+    if (kws.some((k) => k && text.includes(k))) return storeName;
+  }
+  return '';
+}
+
+function resolveStoreForItem(d, manualMap) {
+  const manual = manualMap ? manualMap.get(d.processInstanceId) : undefined;
+  if (manual) {
+    return {
+      _storeName: normalizeStoreName(manual) || manual,
+      _assignReason: '手动归属',
+      _manualStore: true,
+      _autoAssigned: false,
+      fallback: false,
+    };
+  }
+  const r = dingtalkSync.resolveMemberRefundPaymentUnit(
+    d.templateName,
+    d.formValues || {},
+    d.paymentUnit,
+    d.createTime
+  );
+  if (r.storeName) {
+    return {
+      _storeName: normalizeStoreName(r.storeName) || r.storeName,
+      _assignReason: r.reason || '自动归属',
+      _manualStore: false,
+      _autoAssigned: !!r.autoAssigned,
+      fallback: false,
+    };
+  }
+  const inferred = inferStoreFromText(d);
+  if (inferred) {
+    return {
+      _storeName: normalizeStoreName(inferred) || inferred,
+      _assignReason: '文本推断',
+      _manualStore: false,
+      _autoAssigned: false,
+      fallback: false,
+    };
+  }
+  return {
+    _storeName: DEFAULT_STORE,
+    _assignReason: '未指定兜底',
+    _manualStore: false,
+    _autoAssigned: false,
+    fallback: true,
+  };
+}
+
+function pickAmountSafe(d) {
+  const n = extractAmount(d.formValues || {});
+  if (n != null && n !== 0) return n;
+  const n0 = Number(d.amount);
+  if (Number.isFinite(n0) && n0 !== 0) return n0;
+  return 0;
 }
 
 /* ============================================================
@@ -510,43 +677,25 @@ router.get('/dingtalk/report', async (req, res) => {
         );
       }
 
-      /* ⭐ 先读手动归属（一次性批量） */
       const manualMap = await manualStore.getManualStoreMap(
         filtered.map((d) => d.processInstanceId).filter(Boolean)
       );
 
       let autoAssignedCount = 0;
       let manualAssignedCount = 0;
+      let fallbackToDefaultCount = 0;
+
       filtered = filtered.map((d) => {
-        const r = dingtalkSync.resolveMemberRefundPaymentUnit(
-          d.templateName,
-          d.formValues || {},
-          d.paymentUnit,
-          d.createTime
-        );
-        if (r.autoAssigned) autoAssignedCount++;
-
-        /* ⭐ 手动归属优先覆盖 */
-        const manual = manualMap.get(d.processInstanceId);
-        if (manual) {
-          manualAssignedCount++;
-          return {
-            ...d,
-            paymentUnit: d.paymentUnit,
-            _autoAssigned: false,
-            _storeName: manual,
-            _assignReason: '手动归属',
-            _manualStore: true,
-          };
-        }
-
+        const info = resolveStoreForItem(d, manualMap);
+        if (info._manualStore) manualAssignedCount++;
+        else if (info._autoAssigned) autoAssignedCount++;
+        if (info.fallback) fallbackToDefaultCount++;
         return {
           ...d,
-          paymentUnit: r.paymentUnit,
-          _autoAssigned: r.autoAssigned,
-          _storeName: r.storeName,
-          _assignReason: r.reason,
-          _manualStore: false,
+          _autoAssigned: info._autoAssigned,
+          _storeName: info._storeName,
+          _assignReason: info._assignReason,
+          _manualStore: info._manualStore,
         };
       });
 
@@ -561,7 +710,7 @@ router.get('/dingtalk/report', async (req, res) => {
         finishTime: cache.normalizeDbTimeString(d.finishTime) || '',
         paymentUnit: d.paymentUnit,
         payeeAccount: d.payeeAccount,
-        amount: d.amount,
+        amount: pickAmountSafe(d),
         items: d.items,
         formValues: d.formValues,
         operationRecords: d.operationRecords || [],
@@ -586,6 +735,7 @@ router.get('/dingtalk/report', async (req, res) => {
           totalCount: results.length,
           autoAssignedCount,
           manualAssignedCount,
+          fallbackToDefaultCount,
           costMs: cost,
           results,
         },
@@ -721,42 +871,25 @@ router.get('/dingtalk/report', async (req, res) => {
         );
       }
 
-      /* ⭐ 先读手动归属（一次性批量） */
       const manualMap = await manualStore.getManualStoreMap(
         filtered.map((d) => d.processInstanceId).filter(Boolean)
       );
 
       let autoAssignedCount = 0;
       let manualAssignedCount = 0;
+      let fallbackToDefaultCount = 0;
+
       filtered = filtered.map((d) => {
-        const r = dingtalkSync.resolveMemberRefundPaymentUnit(
-          d.templateName,
-          d.formValues || {},
-          d.paymentUnit,
-          d.createTime
-        );
-        if (r.autoAssigned) autoAssignedCount++;
-
-        const manual = manualMap.get(d.processInstanceId);
-        if (manual) {
-          manualAssignedCount++;
-          return {
-            ...d,
-            paymentUnit: d.paymentUnit,
-            _autoAssigned: false,
-            _storeName: manual,
-            _assignReason: '手动归属',
-            _manualStore: true,
-          };
-        }
-
+        const info = resolveStoreForItem(d, manualMap);
+        if (info._manualStore) manualAssignedCount++;
+        else if (info._autoAssigned) autoAssignedCount++;
+        if (info.fallback) fallbackToDefaultCount++;
         return {
           ...d,
-          paymentUnit: r.paymentUnit,
-          _autoAssigned: r.autoAssigned,
-          _storeName: r.storeName,
-          _assignReason: r.reason,
-          _manualStore: false,
+          _autoAssigned: info._autoAssigned,
+          _storeName: info._storeName,
+          _assignReason: info._assignReason,
+          _manualStore: info._manualStore,
         };
       });
 
@@ -771,7 +904,7 @@ router.get('/dingtalk/report', async (req, res) => {
         finishTime: cache.normalizeDbTimeString(d.finishTime) || '',
         paymentUnit: d.paymentUnit,
         payeeAccount: d.payeeAccount,
-        amount: d.amount,
+        amount: pickAmountSafe(d),
         items: d.items,
         formValues: d.formValues,
         operationRecords: d.operationRecords || [],
@@ -807,6 +940,7 @@ router.get('/dingtalk/report', async (req, res) => {
           totalCount: results.length,
           autoAssignedCount,
           manualAssignedCount,
+          fallbackToDefaultCount,
           costMs: cost,
           syncResult: {
             finishedAt,
@@ -849,8 +983,7 @@ router.get('/dingtalk/report', async (req, res) => {
 });
 
 /* ============================================================
- * 路由 6：月综合报告（按月份 + 门店读缓存）
- *   GET /api/dingtalk/monthly-summary?month=2026-09&store=富贵园
+ * 路由 6：月综合报告
  * ============================================================ */
 router.get('/dingtalk/monthly-summary', async (req, res) => {
   const t0 = Date.now();
@@ -885,45 +1018,23 @@ router.get('/dingtalk/monthly-summary', async (req, res) => {
       console.error('[DingTalk][monthly] 查缓存失败', e.message);
     }
 
-    /* ⭐ 手动归属优先 */
     const manualMap = await manualStore.getManualStoreMap(
       cached.map((d) => d.processInstanceId).filter(Boolean)
     );
 
-    /* 会员退费门店归属 + 手动覆盖 */
     const enriched = cached.map((d) => {
-      const manual = manualMap.get(d.processInstanceId);
-      if (manual) {
-        return {
-          ...d,
-          paymentUnit: d.paymentUnit,
-          _autoAssigned: false,
-          _storeName: manual,
-          _assignReason: '手动归属',
-          _manualStore: true,
-        };
-      }
-      const r = dingtalkSync.resolveMemberRefundPaymentUnit(
-        d.templateName,
-        d.formValues || {},
-        d.paymentUnit,
-        d.createTime
-      );
+      const info = resolveStoreForItem(d, manualMap);
       return {
         ...d,
-        paymentUnit: r.paymentUnit,
-        _autoAssigned: r.autoAssigned,
-        _storeName: r.storeName,
-        _assignReason: r.reason,
-        _manualStore: false,
+        paymentUnit: d.paymentUnit,
+        _autoAssigned: info._autoAssigned,
+        _storeName: info._storeName,
+        _assignReason: info._assignReason,
+        _manualStore: info._manualStore,
       };
     });
 
-    const storeConfig = require('../services/storeConfig');
-
-    /* ============================================================
-     * ⭐ 门店配置：读 / 写
-     * ============================================================ */
+    /* 门店配置读写 */
     router.get('/store-config', async (req, res) => {
       try {
         const stores = await storeConfig.listStores();
@@ -947,10 +1058,7 @@ router.get('/dingtalk/monthly-summary', async (req, res) => {
       }
     });
 
-    /* ============================================================
-     * ⭐ 门店过滤
-     * ============================================================ */
-    const STORE_NAME = store ? String(store).trim() : '';
+    const STORE_NAME = store ? normalizeStoreName(String(store).trim()) : '';
     const STORE_UNIT_MAP = {
       '哈德门': [
         '北京林朗悦动体育管理有限公司',
@@ -962,83 +1070,22 @@ router.get('/dingtalk/monthly-summary', async (req, res) => {
       ],
     };
 
-    const STORE_KEYWORDS = {
-      '哈德门': ['哈德门', '哈德'],
-      '富贵园': ['富贵园', '富贵', '东花市'],
-    };
-
-    function inferStoreFromRefund(d) {
-      const fv = d.formValues || {};
-      const text = [
-        fv['会员卡类型'],
-        fv['退卡原因'],
-        fv['收款账户'],
-        fv['持卡人姓名'],
-        d.title,
-      ]
-        .filter(Boolean)
-        .join(' ');
-
-      if (STORE_KEYWORDS['哈德门'].some((k) => text.includes(k))) {
-        return '哈德门';
-      }
-      if (STORE_KEYWORDS['富贵园'].some((k) => text.includes(k))) {
-        return '富贵园';
-      }
-      return '富贵园';
-    }
-
     let filtered = enriched;
     if (STORE_NAME && STORE_UNIT_MAP[STORE_NAME]) {
       const units = STORE_UNIT_MAP[STORE_NAME];
       filtered = enriched.filter((d) => {
-        /* ⭐ 手动归属：优先命中 */
         if (d._manualStore && d._storeName === STORE_NAME) return true;
+        if (d._storeName === STORE_NAME) return true;
 
         const pu = String(d.paymentUnit || '').trim();
-
         if (pu && units.some((u) => pu.includes(u) || u.includes(pu))) {
           return true;
         }
-
-        if (d.templateName === '会员退费' && !pu) {
-          const inferred = inferStoreFromRefund(d);
-          return inferred === STORE_NAME;
-        }
-
         return false;
       });
       console.log(
         `[DingTalk][monthly] 门店过滤「${STORE_NAME}」：${enriched.length} → ${filtered.length}`
       );
-    }
-
-    function pickAmountSafe(d) {
-      const candidates = [
-        '补退金额（元）',
-        '补退金额',
-        '退款金额（元）',
-        '退款金额',
-        '报销金额',
-        '借款金额（元）',
-        '借款金额',
-        '本次申请支付金额（元）',
-        '本次申请支付金额',
-        '总价款（元）',
-        '金额（元）',
-        '金额',
-      ];
-      const fv = d.formValues || {};
-      for (const k of candidates) {
-        const v = fv[k];
-        if (v != null && v !== 'null' && v !== '') {
-          const n = Number(String(v).replace(/[^\d.-]/g, ''));
-          if (Number.isFinite(n) && n !== 0) return n;
-        }
-      }
-      const n0 = Number(d.amount);
-      if (Number.isFinite(n0) && n0 !== 0) return n0;
-      return 0;
     }
 
     const results = filtered.map((d) => ({
@@ -1097,9 +1144,6 @@ router.get('/dingtalk/monthly-summary', async (req, res) => {
 
 /* ============================================================
  * 路由 7：手动归属门店
- *   POST   /api/dingtalk/manual-store      设置
- *   DELETE /api/dingtalk/manual-store      删除
- *   GET    /api/dingtalk/manual-store      查询单条
  * ============================================================ */
 router.post('/dingtalk/manual-store', async (req, res) => {
   try {
@@ -1111,7 +1155,7 @@ router.post('/dingtalk/manual-store', async (req, res) => {
     }
     const r = await manualStore.setManualStore(
       processInstanceId,
-      storeName,
+      normalizeStoreName(storeName) || storeName,
       updatedBy
     );
     res.json({ errorcode: 0, errormsg: '保存成功', data: r });
@@ -1145,8 +1189,28 @@ router.get('/dingtalk/manual-store', async (req, res) => {
         .status(400)
         .json({ errorcode: 400, errormsg: '缺少 processInstanceId' });
     }
-    const storeName = await manualStore.getManualStore(processInstanceId);
-    res.json({ errorcode: 0, errormsg: '获取成功', data: { storeName } });
+
+    const ids = String(processInstanceId)
+      .split(',')
+      .map((s) => s.trim())
+      .filter(Boolean);
+
+    if (ids.length === 1) {
+      const raw = await manualStore.getManualStore(ids[0]);
+      const storeName = raw ? normalizeStoreName(raw) || raw : null;
+      return res.json({
+        errorcode: 0,
+        errormsg: '获取成功',
+        data: { storeName },
+      });
+    }
+
+    const map = await manualStore.getManualStoreMap(ids);
+    const out = {};
+    map.forEach((v, k) => {
+      out[k] = normalizeStoreName(v) || v;
+    });
+    res.json({ errorcode: 0, errormsg: '获取成功', data: out });
   } catch (e) {
     res.status(500).json({ errorcode: 500, errormsg: e.message });
   }
