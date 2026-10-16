@@ -34,13 +34,17 @@ const VALID_PERMISSIONS = new Set([
   /* 薪酬佣金计算 */
   'payroll:calc',
   'payroll:settle',
+  'payroll:reverse',
+  'payroll:restore',
   'ops:view',
   'export:payroll',
   'export:personal',
+  /* 报告 */
   'report:marketing:view',
   'report:monthly:view',
   'report:dingtalk:view',
   /* 综合设置 */
+  'store:edit',
   'user:add',
   'user:resetPwd',
 ]);

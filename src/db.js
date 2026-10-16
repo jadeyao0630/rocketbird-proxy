@@ -318,6 +318,18 @@ async function ensureTables() {
       KEY idx_bus_month (bus_id, month)
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`,
      
+    /* 未结算草稿：按门店和月份保存可恢复的计算结果及职位调整 */
+    `CREATE TABLE IF NOT EXISTS payroll_draft (
+      id BIGINT PRIMARY KEY AUTO_INCREMENT,
+      bus_id VARCHAR(64) NOT NULL,
+      month VARCHAR(7) NOT NULL,
+      results_json LONGTEXT NOT NULL,
+      overrides_json LONGTEXT DEFAULT NULL,
+      updated_by VARCHAR(64) DEFAULT NULL,
+      updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+      UNIQUE KEY uk_bus_month (bus_id, month)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`,
+
     /* ⭐ 薪酬结算快照 */
     `CREATE TABLE IF NOT EXISTS payroll_settlement (
       id            BIGINT PRIMARY KEY AUTO_INCREMENT,
