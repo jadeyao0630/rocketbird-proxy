@@ -345,6 +345,28 @@ async function ensureTables() {
       UNIQUE KEY uk_bus_month (bus_id, month),
       KEY idx_bus_month (bus_id, month)
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`,
+    
+    /* ============================================================
+     * 豆包 AI：全局月报分析提示词
+     * ============================================================ */
+    `CREATE TABLE IF NOT EXISTS gym_ai_prompt_config (
+      id          TINYINT UNSIGNED NOT NULL PRIMARY KEY,
+      prompt_text LONGTEXT NOT NULL,
+      updated_at  TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+                  ON UPDATE CURRENT_TIMESTAMP
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+      COLLATE=utf8mb4_unicode_ci`,
+
+    /* ============================================================
+     * 豆包 AI：各门店独立经营画像
+     * ============================================================ */
+    `CREATE TABLE IF NOT EXISTS gym_ai_store_profile (
+      store_id     VARCHAR(128) NOT NULL PRIMARY KEY,
+      profile_json JSON NOT NULL,
+      updated_at   TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+                   ON UPDATE CURRENT_TIMESTAMP
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+      COLLATE=utf8mb4_unicode_ci`,
   ];
 
   for (const sql of sqls) {
