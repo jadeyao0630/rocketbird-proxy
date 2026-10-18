@@ -44,6 +44,7 @@ const VALID_PERMISSIONS = new Set([
   'report:monthly:view',
   'report:dingtalk:view',
   /* 综合设置 */
+  'store:view',
   'store:edit',
   'user:add',
   'user:resetPwd',
