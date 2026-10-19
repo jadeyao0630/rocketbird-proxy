@@ -6,6 +6,7 @@ const router = express.Router();
 
 const dingtalkCache = require('../services/dingtalkCache');
 const storeConfig = require('../services/storeConfig');
+const manualStore = require('../services/manualStore');
 const aiConfig = require('../services/aiConfig');
 const {
   classifyDingtalkItems,
@@ -110,7 +111,11 @@ async function loadDingtalkForAI(storeName, month, storeId) {
     return { ...d, paymentUnit: finalUnit };
   });
 
-  /* ⭐ 门店过滤：走 storeConfig.matchStoreByItem（异步） */
+  // 与钉钉流程页面一致：数据库人工归属优先于付款单位/关键字。
+  const manualIds = enriched.map((d) => d.processInstanceId).filter(Boolean);
+  const manualMap = await manualStore.getManualStoreMap(manualIds);
+
+  /* ⭐ 门店过滤：先人工归属，再自动匹配 */
   const storeItems = [];
   for (const d of enriched) {
     if (!storeName) {
@@ -118,7 +123,10 @@ async function loadDingtalkForAI(storeName, month, storeId) {
       continue;
     }
     try {
-      const matched = await storeConfig.matchStoreByItem(d);
+      const manualName = manualMap.get(String(d.processInstanceId || ''));
+      const matched = manualName
+        ? storeConfig.normalizeStoreName(manualName)
+        : await storeConfig.matchStoreByItem(d);
       if (matched === storeName) storeItems.push(d);
     } catch (e) {
       console.warn('[AI][dingtalk] matchStoreByItem 失败', e.message);

@@ -1287,4 +1287,5 @@ router.get('/dingtalk/manual-store', async (req, res) => {
   }
 });
 
+router.use(require('./manualCategoryRoutes'));
 module.exports = router;
