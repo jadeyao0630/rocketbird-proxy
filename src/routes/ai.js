@@ -14,19 +14,15 @@ const {
   MEMBER_REFUND_TPL,
 } = require('../services/dingtalkClassify');
 
-const ARK_API_KEY = process.env.ARK_API_KEY;
-const ARK_MODEL_ID = process.env.ARK_MODEL_ID;
-
-console.log('[AI] 路由文件已加载', {
-  hasKey: !!ARK_API_KEY,
-  hasModel: !!ARK_MODEL_ID,
-});
-
-if (!ARK_API_KEY || !ARK_MODEL_ID) {
-  console.warn(
-    '[AI] ⚠️ 缺少配置：ARK_API_KEY / ARK_MODEL_ID，请在 .env 里设置'
-  );
+// 环境变量在请求时读取，避免路由模块初始化早于 dotenv.config()。
+// 不在日志中输出 API Key 本身。
+function getArkConfig() {
+  const apiKey = String(process.env.ARK_API_KEY || '').trim();
+  const modelId = String(process.env.ARK_MODEL_ID || '').trim();
+  return { apiKey, modelId };
 }
+
+console.log('[AI] 路由文件已加载（ARK 配置在请求时检查）');
 
 /* ============================================================
  * 会员退费 → 付款单位推断
@@ -204,9 +200,17 @@ async function loadDingtalkForAI(storeName, month, storeId) {
  * 路由：AI 月报
  * ============================================================ */
 router.post('/ai/monthly-report', async (req, res) => {
+  console.log('[AI DEBUG]', {
+  pid: process.pid,
+  cwd: process.cwd(),
+  hasKey: !!process.env.ARK_API_KEY?.trim(),
+  hasModel: !!process.env.ARK_MODEL_ID?.trim(),
+  routeFile: __filename,
+});
   console.log('[AI] 命中 /ai/monthly-report，body keys =', Object.keys(req.body || {}));
   try {
-    if (!ARK_API_KEY || !ARK_MODEL_ID) {
+    const { apiKey, modelId } = getArkConfig();
+    if (!apiKey || !modelId) {
       return res.status(500).json({
         errorcode: 500,
         errormsg: '服务端未配置 ARK_API_KEY / ARK_MODEL_ID',
@@ -238,7 +242,7 @@ router.post('/ai/monthly-report', async (req, res) => {
     const r = await axios.post(
       'https://ark.cn-beijing.volces.com/api/v3/chat/completions',
       {
-        model: ARK_MODEL_ID,
+        model: modelId,
         messages: [
           { role: 'system', content: await aiConfig.getPrompt() },
           {
@@ -252,7 +256,7 @@ router.post('/ai/monthly-report', async (req, res) => {
       },
       {
         headers: {
-          Authorization: `Bearer ${ARK_API_KEY}`,
+          Authorization: `Bearer ${apiKey}`,
           'Content-Type': 'application/json',
         },
         timeout: 180000,
@@ -315,7 +319,13 @@ router.post('/ai/store-config', async (req, res) => {
  * 健康检查
  * ============================================================ */
 router.get('/ai/__ping', (req, res) => {
-  res.json({ ok: true, msg: 'ai routes mounted' });
+  res.json({
+    ok: true,
+    version: 'AI-DEBUG-20261020',
+    pid: process.pid,
+    hasKey: !!process.env.ARK_API_KEY?.trim(),
+    hasModel: !!process.env.ARK_MODEL_ID?.trim(),
+  });
 });
 
 // 额外的 AI 配置 API，与本文件共享同一个挂载前缀。

@@ -1,4 +1,20 @@
-require('dotenv').config();
+const path = require('path');
+const fs = require('fs');
+const dotenv = require('dotenv');
+
+// 始终以 server.js 所在的 backend 目录为基准，而非进程启动目录。
+const envPath = path.resolve(__dirname, '.env');
+const envExists = fs.existsSync(envPath);
+const envResult = dotenv.config({ path: envPath });
+console.log('[boot] 环境变量诊断:', {
+  envPath,
+  envExists,
+  envLoaded: !envResult.error,
+  envError: envResult.error ? envResult.error.code || envResult.error.message : null,
+  hasArkApiKey: Boolean(String(process.env.ARK_API_KEY || '').trim()),
+  hasArkModelId: Boolean(String(process.env.ARK_MODEL_ID || '').trim()),
+});
+
 const express = require('express');
 const cors = require('cors');
 const cookieParser = require('cookie-parser');
